@@ -464,18 +464,53 @@ do_add_interactive() {
 
     msg "Добавляю сервис '$name'..."
 
-    # Конфиг nginx (упрощенная генерация)
-    local nginx_conf
+    # Генерация конфига nginx
+    # Host передаём как адрес целевого сервиса, чтобы бэкенд не отклонял запрос
+    # (например, веб-морда роутера проверяет Host и отказывает при несовпадении)
+    local tmp="/tmp/rproxy_$name.conf"
     if [ -n "$domain" ]; then
-        nginx_conf="server { listen 80; server_name $domain; location / { proxy_pass http://127.0.0.1:$tunnel_port; proxy_set_header Host \$host; proxy_set_header X-Real-IP \$remote_addr; } }"
+        cat > "$tmp" << NGINXEOF
+server {
+    listen 80;
+    server_name $domain;
+    location / {
+        proxy_pass http://127.0.0.1:$tunnel_port;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $t_host:$t_port;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_connect_timeout 60s;
+        proxy_send_timeout 60s;
+        proxy_read_timeout 60s;
+    }
+}
+NGINXEOF
     else
-        nginx_conf="server { listen $ext_port; location / { proxy_pass http://127.0.0.1:$tunnel_port; proxy_set_header Host \$host; } }"
+        cat > "$tmp" << NGINXEOF
+server {
+    listen $ext_port;
+    location / {
+        proxy_pass http://127.0.0.1:$tunnel_port;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $t_host:$t_port;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_connect_timeout 60s;
+        proxy_send_timeout 60s;
+        proxy_read_timeout 60s;
+    }
+}
+NGINXEOF
     fi
 
     # Деплой
-    local tmp="/tmp/rproxy_$name.conf"
-    echo "$nginx_conf" > "$tmp"
-    scp_cmd "$tmp" "$VPS_USER@$VPS_HOST:$REMOTE_NGINX_DIR/rproxy_$name.conf" || { err "Ошибка деплоя nginx"; pause; return; }
+    scp_cmd "$tmp" "$VPS_USER@$VPS_HOST:$REMOTE_NGINX_DIR/rproxy_$name.conf" || { err "Ошибка деплоя nginx"; rm -f "$tmp"; pause; return; }
     ssh_cmd "nginx -t && systemctl reload nginx" >/dev/null 2>&1
 
     # SSL если нужно

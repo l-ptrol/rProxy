@@ -6,9 +6,51 @@ ENABLED=yes
 PROCS="rproxy"
 DESC="rProxy reverse proxy tunnels"
 
+# Задержка перед первым запуском (секунды)
+# Даёт время остальным сервисам стартовать
+BOOT_DELAY=30
+
+# Количество попыток и пауза между ними
+MAX_RETRIES=3
+RETRY_DELAY=15
+
 start() {
     echo "Starting $DESC..."
+    
+    # Задержка при старте — даём время сети и сервисам подняться
+    echo "  Ожидание $BOOT_DELAY сек (инициализация сети и сервисов)..."
+    sleep $BOOT_DELAY
+    
+    # Первая попытка
     /opt/bin/rproxy start
+    
+    # Повторные попытки для сервисов, которые не смогли стартовать
+    local attempt=1
+    while [ "$attempt" -le "$MAX_RETRIES" ]; do
+        sleep $RETRY_DELAY
+        
+        # Проверяем, все ли сервисы запущены
+        local total=0 running=0
+        for f in /opt/etc/rproxy/services/*.conf; do
+            [ -f "$f" ] || continue
+            . "$f"
+            [ "$SVC_ENABLED" != "yes" ] && continue
+            total=$((total + 1))
+            if pgrep -f "ssh.*$SVC_TUNNEL_PORT:$SVC_TARGET_HOST" >/dev/null 2>&1; then
+                running=$((running + 1))
+            fi
+        done
+        
+        # Если все сервисы запущены — выходим
+        if [ "$running" -ge "$total" ] || [ "$total" -eq 0 ]; then
+            echo "  Все $total сервисов запущены."
+            break
+        fi
+        
+        echo "  Попытка $attempt/$MAX_RETRIES: запущено $running/$total, перезапускаю отсутствующие..."
+        /opt/bin/rproxy start
+        attempt=$((attempt + 1))
+    done
 }
 
 stop() {
