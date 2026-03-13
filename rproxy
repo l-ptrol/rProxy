@@ -3,7 +3,7 @@
 # Публикация локальных сервисов через SSH-туннели + nginx на VPS
 # http://5.104.75.50:3000/Petro1990/rProxy
 
-VERSION="1.6.1"
+VERSION="1.6.2"
 export PATH="/opt/bin:/opt/sbin:$PATH"
 CONF_DIR="/opt/etc/rproxy"
 CONF_FILE="$CONF_DIR/rproxy.conf"
@@ -596,69 +596,7 @@ do_add_interactive() {
 
     # Генерация конфига nginx
     local tmp="/tmp/rproxy_$name.conf"
-    if [ -n "$domain" ]; then
-        cat > "$tmp" << NGINXEOF
-server {
-    listen 80;
-    server_name "$domain";
-
-    proxy_buffering off;
-    proxy_request_buffering off;
-    proxy_buffer_size 128k;
-    proxy_buffers 4 256k;
-    proxy_busy_buffers_size 256k;
-
-    location / {
-        $auth_config
-        proxy_pass http://127.0.0.1:$tunnel_port;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade \$http_upgrade;
-        proxy_set_header Connection "upgrade";
-        
-        # Стелс-режим: прикидываемся локальным запросом
-        proxy_set_header Host "$stealth_host";
-        proxy_set_header Origin "http://$stealth_host";
-        proxy_set_header Referer "http://$stealth_host/";
-        
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
-        proxy_set_header X-Forwarded-Host \$http_host;
-        proxy_set_header X-Forwarded-Port \$server_port;
-        
-        # Трансляция куки: меняем локальный IP обратно на домен в браузере
-        proxy_cookie_domain "$t_host" "\$host";
-        proxy_cookie_path / "/; SameSite=Lax";
-        
-        proxy_hide_header X-Frame-Options;
-        proxy_connect_timeout 60s;
-        proxy_send_timeout 60s;
-        proxy_read_timeout 60s;
-    }
-    $auth_config
-}
-NGINXEOF
-    else
-        cat > "$tmp" << NGINXEOF
-server {
-    listen $ext_port;
-
-    proxy_buffering off;
-    proxy_request_buffering off;
-    proxy_buffer_size 128k;
-    proxy_buffers 4 256k;
-    proxy_busy_buffers_size 256k;
-
-    location / {
-        $auth_config
-        proxy_pass http://127.0.0.1:$tunnel_port;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade \$http_upgrade;
-        proxy_set_header Connection "upgrade";
-        
-        # Стелс-режим: прикидываемся локальным запросом
-        proxy_set_header Host "$stealth_host";
-        proxy_set_header Origin "http://$stealth_host";
+    generate_nginx_conf "$name" "$t_host" "$t_port" "$tunnel_port" "$domain" "$ext_port" "$use_ndm_auth" "$tmp"
         proxy_set_header Referer "http://$stealth_host/";
 
         proxy_set_header X-Real-IP \$remote_addr;
@@ -797,26 +735,6 @@ server {
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto \$scheme;
-        proxy_cookie_domain "$t_host" "\$host";
-    }
-}
-NGINXEOF
-    else
-        cat > "$tmp" << NGINXEOF
-server {
-    listen $ext_port;
-    proxy_buffering off;
-    proxy_request_buffering off;
-    location / {
-        $auth_config
-        proxy_pass http://127.0.0.1:$tunnel_port;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade \$http_upgrade;
-        proxy_set_header Connection "upgrade";
-        proxy_set_header Host "$stealth_host";
-        proxy_set_header Origin "http://$stealth_host";
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
         proxy_cookie_domain "$t_host" "\$host";
     }
 }
@@ -1274,6 +1192,86 @@ do_stop_service() {
     msg "Туннель '$name' остановлен"
 }
 
+_clear_svc_vars() {
+    unset SVC_NAME SVC_VPS SVC_TARGET_HOST SVC_TARGET_PORT SVC_TUNNEL_PORT
+    unset SVC_EXT_PORT SVC_DOMAIN SVC_SSL SVC_NDM_AUTH SVC_HTPASSWD SVC_ENABLED
+}
+
+load_service() {
+    _clear_svc_vars
+    local f="$SERVICES_DIR/$1.conf"
+    [ -f "$f" ] || return 1
+    . "$f"
+    load_vps "$SVC_VPS"
+}
+
+generate_nginx_conf() {
+    local name="$1"
+    local t_host="$2"
+    local t_port="$3"
+    local tunnel_port="$4"
+    local domain="$5"
+    local ext_port="$6"
+    local use_ndm_auth="$7"
+    local target_file="$8"
+
+    local stealth_host="$t_host"
+    [ "$t_port" != "80" ] && stealth_host="$t_host:$t_port"
+    
+    local auth_config=""
+    if [ "$use_ndm_auth" = "yes" ]; then
+        auth_config="
+    auth_basic \"Restricted Access\";
+    auth_basic_user_file /etc/nginx/rproxy_$name.htpasswd;
+    "
+    fi
+
+    if [ -n "$domain" ]; then
+        cat > "$target_file" << NGINXEOF
+server {
+    listen 80;
+    server_name "$domain";
+    proxy_buffering off;
+    proxy_request_buffering off;
+    location / {
+        $auth_config
+        proxy_pass http://127.0.0.1:$tunnel_port;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host "$stealth_host";
+        proxy_set_header Origin "http://$stealth_host";
+        proxy_set_header Referer "http://$stealth_host/";
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_cookie_domain "$t_host" "\$host";
+    }
+}
+NGINXEOF
+    else
+        cat > "$target_file" << NGINXEOF
+server {
+    listen $ext_port;
+    proxy_buffering off;
+    proxy_request_buffering off;
+    location / {
+        $auth_config
+        proxy_pass http://127.0.0.1:$tunnel_port;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host "$stealth_host";
+        proxy_set_header Origin "http://$stealth_host";
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_cookie_domain "$t_host" "\$host";
+    }
+}
+NGINXEOF
+    fi
+}
+
 do_start_all() {
     for f in "$SERVICES_DIR"/*.conf; do
         [ -f "$f" ] || continue
@@ -1490,12 +1488,19 @@ case "${1:-}" in
             [ -f "$f" ] || continue
             local name=$(basename "$f" .conf)
             (
-                load_service "$name" >/dev/null 2>&1
-                local state="остановлен"
-                is_running "$SVC_NAME" && state="работает"
-                local info="$SVC_NAME  $SVC_TARGET_HOST:$SVC_TARGET_PORT → VPS($CUR_VPS_ID):$SVC_TUNNEL_PORT"
-                [ -n "$SVC_DOMAIN" ] && info="$info ($SVC_DOMAIN)"
-                echo "$info [$state]"
+                _clear_svc_vars
+                . "$f"
+                
+                local status="${RED}OFFLINE${NC}"
+                is_running "$SVC_NAME" && status="${GREEN}ONLINE${NC}"
+                
+                local type="[PORT]"
+                [ -n "$SVC_DOMAIN" ] && type="[DOM ]"
+
+                local addr="$SVC_EXT_PORT"
+                [ -n "$SVC_DOMAIN" ] && addr="$SVC_DOMAIN"
+                
+                printf "  %-15s %-7s %-20s %s\n" "$SVC_NAME" "$type" "$addr" "$status"
             )
         done
         ;;
