@@ -3,7 +3,7 @@
 # Публикация локальных сервисов через SSH-туннели + nginx на VPS
 # http://5.104.75.50:3000/Petro1990/rProxy
 
-VERSION="1.0.9"
+VERSION="1.1.0"
 CONF_DIR="/opt/etc/rproxy"
 CONF_FILE="$CONF_DIR/rproxy.conf"
 SERVICES_DIR="$CONF_DIR/services"
@@ -93,24 +93,33 @@ load_vps() {
 
 migrate_config() {
     mkdir -p "$VPS_DIR" "$SERVICES_DIR" "$PID_DIR"
-    if [ -f "$CONF_FILE" ] && [ ! -f "$VPS_DIR/default.conf" ]; then
-        msg "Миграция конфигурации в новый формат..."
-        # Важно: загружаем текущие настройки перед миграцией
-        . "$CONF_FILE"
-        # Копируем параметры в профиль default
-        cat > "$VPS_DIR/default.conf" <<EOF
+    
+    # Проверка на "битый" (пустой) конфиг после неудачной миграции (1.0.7-1.0.8)
+    local broken=0
+    [ -f "$VPS_DIR/default.conf" ] && ! grep -q "VPS_HOST=\"[0-9]" "$VPS_DIR/default.conf" && broken=1
+
+    if [ -f "$CONF_FILE" ] && { [ ! -f "$VPS_DIR/default.conf" ] || [ "$broken" -eq 1 ]; }; then
+        # Если rproxy.conf ещё содержит данные серверов (не пустой)
+        if grep -q "VPS_HOST=" "$CONF_FILE"; then
+            msg "Восстановление конфигурации VPS..."
+            . "$CONF_FILE"
+            cat > "$VPS_DIR/default.conf" <<EOF
 VPS_HOST="$VPS_HOST"
 VPS_PORT="$VPS_PORT"
 VPS_USER="$VPS_USER"
 VPS_AUTH="$VPS_AUTH"
 VPS_PASS="$VPS_PASS"
 EOF
-        # В основном конфиге оставляем только глобальные настройки
-        cat > "$CONF_FILE.tmp" <<EOF
+            # Очищаем rproxy.conf от старых системных переменных
+            cat > "$CONF_FILE.tmp" <<EOF
 CERTBOT_EMAIL="$CERTBOT_EMAIL"
 EOF
-        mv "$CONF_FILE.tmp" "$CONF_FILE"
-        chmod 600 "$VPS_DIR/default.conf" "$CONF_FILE"
+            mv "$CONF_FILE.tmp" "$CONF_FILE"
+        elif [ "$broken" -eq 1 ] && [ ! "$(ls -A "$SERVICES_DIR")" ]; then
+            # Если всё пусто и сломано — удаляем пустой дефолт, чтобы запустить чистый setup
+            rm -f "$VPS_DIR/default.conf"
+        fi
+        [ -f "$VPS_DIR/default.conf" ] && chmod 600 "$VPS_DIR/default.conf"
     fi
 }
 
@@ -873,7 +882,9 @@ do_setup() {
             idx=$((idx + 1))
             VPS_HOST="" # Сброс перед загрузкой
             . "$f"
-            printf "  ${BOLD}%d)${NC}  %s  (${DIM}%s@%s:%s${NC})\n" "$idx" "$(basename "$f" .conf)" "$VPS_USER" "$VPS_HOST" "$VPS_PORT"
+            local v_info="${DIM}${VPS_USER}@${VPS_HOST}:${VPS_PORT}${NC}"
+            [ -z "$VPS_HOST" ] && v_info="${RED}Не настроен${NC}"
+            printf "  ${BOLD}%d)${NC}  %-14s %b\n" "$idx" "$(basename "$f" .conf)" "$v_info"
             vps_list="$vps_list $(basename "$f" .conf)"
         done
 
