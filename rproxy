@@ -3,7 +3,7 @@
 # Публикация локальных сервисов через SSH-туннели + nginx на VPS
 # http://5.104.75.50:3000/Petro1990/rProxy
 
-VERSION="1.1.3"
+VERSION="1.1.4"
 CONF_DIR="/opt/etc/rproxy"
 CONF_FILE="$CONF_DIR/rproxy.conf"
 SERVICES_DIR="$CONF_DIR/services"
@@ -233,16 +233,17 @@ main_menu() {
 
         printf "  ${BOLD}1)${NC}  📋  Список сервисов и статус\n"
         printf "  ${BOLD}2)${NC}  ➕  Добавить сервис\n"
-        printf "  ${BOLD}3)${NC}  ❌  Удалить сервис\n"
+        printf "  ${BOLD}3)${NC}  📝  Редактировать сервис\n"
+        printf "  ${BOLD}4)${NC}  ❌  Удалить сервис\n"
         draw_separator
-        printf "  ${BOLD}4)${NC}  ▶️   Запустить туннель\n"
-        printf "  ${BOLD}5)${NC}  ⏹️   Остановить туннель\n"
-        printf "  ${BOLD}6)${NC}  🔄  Перезапустить туннель\n"
+        printf "  ${BOLD}5)${NC}  ▶️   Запустить туннель\n"
+        printf "  ${BOLD}6)${NC}  ⏹️   Остановить туннель\n"
+        printf "  ${BOLD}7)${NC}  🔄  Перезапустить туннель\n"
         draw_separator
-        printf "  ${BOLD}7)${NC}  🔒  Получить/Обновить SSL (Certbot)\n"
-        printf "  ${BOLD}8)${NC}  ⚙️   Настройки VPS\n"
-        printf "  ${BOLD}9)${NC}  🚀  Обновить rProxy\n"
-        printf "  ${BOLD}10)${NC} 🏥  Проверка VPS (Health)\n"
+        printf "  ${BOLD}8)${NC}  🔒  Получить/Обновить SSL (Certbot)\n"
+        printf "  ${BOLD}9)${NC}  ⚙️   Настройки VPS\n"
+        printf "  ${BOLD}10)${NC} 🚀  Обновить rProxy\n"
+        printf "  ${BOLD}11)${NC} 🏥  Проверка VPS (Health)\n"
         printf "  ${BOLD}0)${NC}  🚪  Выход\n"
 
         prompt "Выберите действие: "
@@ -250,14 +251,15 @@ main_menu() {
         case "$REPLY" in
             1) show_status ;;
             2) do_add_interactive ;;
-            3) do_remove_interactive ;;
-            4) do_start_interactive ;;
-            5) do_stop_interactive ;;
-            6) do_restart_interactive ;;
-            7) do_ssl_interactive ;;
-            8) do_setup ;;
-            9) do_self_update ;;
-            10) do_health_check ;;
+            3) do_edit_interactive ;;
+            4) do_remove_interactive ;;
+            5) do_start_interactive ;;
+            6) do_stop_interactive ;;
+            7) do_restart_interactive ;;
+            8) do_ssl_interactive ;;
+            9) do_setup ;;
+            10) do_self_update ;;
+            11) do_health_check ;;
             0|q) clear_screen; exit 0 ;;
             *) ;;
         esac
@@ -354,11 +356,13 @@ select_vps_interactive() {
         vps_list="$vps_list $(basename "$f" .conf)"
     done
     
-    local next_idx=$((idx + 1))
-    printf "  ${BOLD}%d)${NC}  ➕  Добавить новый VPS\n" "$next_idx"
+    printf "  ${BOLD}901)${NC} ➕  Добавить новый VPS\n"
+    printf "  ${BOLD}0)${NC}   Назад\n"
     prompt "Выберите номер: "
     
-    if [ "$REPLY" = "$next_idx" ]; then
+    [ "$REPLY" = "0" ] && { SELECTED_VPS_ID=""; return 0; }
+
+    if [ "$REPLY" = "901" ]; then
         do_add_vps
         # Возвращаем последний созданный (упрощение)
         SELECTED_VPS_ID=$(ls -t "$VPS_DIR"/*.conf | head -n 1 | xargs basename | sed 's/\.conf//')
@@ -495,6 +499,49 @@ EOF
 
     msg "Сервис '$name' добавлен на VPS '$vps_id'!"
     do_start_service "$name"
+    pause
+}
+
+# ══════════════════════════════════════════════════════════════════════
+# РЕДАКТИРОВАТЬ СЕРВИС
+# ══════════════════════════════════════════════════════════════════════
+do_edit_interactive() {
+    clear_screen
+    draw_box "Редактировать сервис"
+    printf "\n"
+
+    select_service "Выберите сервис для редактирования" "all" || { pause; return; }
+    local name="$SELECTED_SERVICE"
+    [ "$name" = "__ALL__" ] && { warn "Выберите конкретный сервис"; pause; return; }
+
+    load_service "$name" || { pause; return; }
+
+    header "Редактирование: $name"
+    printf "  ${DIM}Текущая цель:${NC}  $SVC_TARGET_HOST:$SVC_TARGET_PORT\n\n"
+
+    prompt "Новый IP адрес [$SVC_TARGET_HOST]: "
+    local new_host="${REPLY:-$SVC_TARGET_HOST}"
+    
+    prompt "Новый внутренний порт [$SVC_TARGET_PORT]: "
+    local new_port="${REPLY:-$SVC_TARGET_PORT}"
+
+    prompt "Сохранить изменения? (д/н) [д]: "
+    [ "${REPLY:-д}" != "д" ] && [ "${REPLY:-д}" != "y" ] && { msg "Отменено"; pause; return; }
+
+    # Обновляем конфиг
+    sed -i "s/SVC_TARGET_HOST=.*/SVC_TARGET_HOST=\"$new_host\"/" "$SERVICES_DIR/$name.conf"
+    sed -i "s/SVC_TARGET_PORT=.*/SVC_TARGET_PORT=\"$new_port\"/" "$SERVICES_DIR/$name.conf"
+
+    msg "Настройки обновлены. Перезапускаю туннель..."
+    if is_running "$name"; then
+        do_stop_service "$name"
+        sleep 1
+        do_start_service "$name"
+    else
+        msg "Сервис был остановлен. Настройки вступят в силу при следующем запуске."
+    fi
+
+    msg "Готово!"
     pause
 }
 
@@ -637,53 +684,107 @@ do_remove_interactive() {
     draw_box "Удалить сервис"
     printf "\n"
 
-    local services=""
-    local idx=0
-    for f in "$SERVICES_DIR"/*.conf; do
-        [ -f "$f" ] || continue
-        idx=$((idx + 1))
-        . "$f"
-        local st="○"
-        is_running "$SVC_NAME" && st="●"
-        printf "  ${BOLD}%d)${NC}  %s  %s  (%s:%s)\n" "$idx" "$st" "$SVC_NAME" "$SVC_TARGET_HOST" "$SVC_TARGET_PORT"
-        [ -z "$services" ] && services="$SVC_NAME" || services="$services $SVC_NAME"
-    done
+    select_service "Выберите сервис для удаления" "all" || { pause; return; }
+    local name="$SELECTED_SERVICE"
+    [ "$name" = "__ALL__" ] && { warn "Для удаления выберите конкретный сервис"; pause; return; }
 
-    if [ "$idx" -eq 0 ]; then
-        printf "  ${YELLOW}Нет сервисов для удаления.${NC}\n"
-        pause
-        return
-    fi
-
-    printf "  ${BOLD}0)${NC}  Назад\n"
-    prompt "Выберите сервис для удаления: "
-
-    [ "$REPLY" = "0" ] && return
-    [ -z "$REPLY" ] && return
-
-    local sel_name
-    sel_name=$(echo "$services" | cut -d' ' -f"$REPLY")
-    [ -z "$sel_name" ] && { warn "Неверный выбор"; pause; return; }
-
-    prompt "Удалить сервис '$sel_name'? (д/н) [н]: "
-    local confirm="${REPLY:-н}"
-    case "$confirm" in
+    prompt "Удалить сервис '$name'? (д/н) [н]: "
+    case "${REPLY:-н}" in
         д|Д|y|Y|да|yes) ;;
         *) msg "Отменено"; pause; return ;;
     esac
 
-    load_service "$sel_name" || { pause; return; }
-    is_running "$sel_name" && do_stop_service "$sel_name"
+    load_service "$name" || { pause; return; }
+    is_running "$name" && do_stop_service "$name"
 
     msg "Удаляю конфиг nginx на VPS..."
-    ssh_cmd "rm -f $REMOTE_NGINX_DIR/rproxy_$sel_name.conf && nginx -t && systemctl reload nginx" || {
-        warn "Не удалось удалить конфиг nginx на VPS"
+    ssh_cmd "rm -f $REMOTE_NGINX_DIR/rproxy_$name.conf && nginx -t && systemctl reload nginx" >/dev/null 2>&1 || {
+        warn "Не удалось удалить конфиг nginx на VPS (возможно он уже удален)"
     }
 
-    rm -f "$SERVICES_DIR/$sel_name.conf"
-    rm -f "$(get_pid_file "$sel_name")"
+    rm -f "$SERVICES_DIR/$name.conf"
+    rm -f "$(get_pid_file "$name")"
 
-    msg "Сервис '$sel_name' удалён"
+    msg "Сервис '$name' удалён"
+    pause
+}
+
+# ══════════════════════════════════════════════════════════════════════
+# РЕДАКТИРОВАТЬ СЕРВИС (интерактивно)
+# ══════════════════════════════════════════════════════════════════════
+do_edit_interactive() {
+    clear_screen
+    draw_box "Редактировать сервис"
+    printf "\n"
+
+    select_service "Выберите сервис для редактирования" "all" || { pause; return; }
+    local name="$SELECTED_SERVICE"
+    [ "$name" = "__ALL__" ] && { warn "Для редактирования выберите конкретный сервис"; pause; return; }
+
+    load_service "$name" || { pause; return; }
+
+    printf "\n"
+    draw_separator
+    printf "  ${DIM}Текущие параметры:${NC}\n"
+    printf "  Цель:          ${BOLD}$SVC_TARGET_HOST:$SVC_TARGET_PORT${NC}\n"
+    printf "  Туннель:       порт ${BOLD}$SVC_TUNNEL_PORT${NC}\n"
+    [ -n "$SVC_DOMAIN" ] && printf "  Домен:         ${BOLD}$SVC_DOMAIN${NC}\n"
+    printf "  Внешний порт:  ${BOLD}$SVC_EXT_PORT${NC}\n"
+    draw_separator
+
+    prompt "Новый адрес (IP:порт) [$SVC_TARGET_HOST:$SVC_TARGET_PORT]: "
+    local new_target="${REPLY:-$SVC_TARGET_HOST:$SVC_TARGET_PORT}"
+
+    local new_host="${new_target%:*}"
+    local new_port="${new_target#*:}"
+    if [ "$new_host" = "$new_port" ]; then
+        new_port="$new_host"
+        new_host="127.0.0.1"
+    fi
+
+    # Если ничего не изменилось
+    if [ "$new_host" = "$SVC_TARGET_HOST" ] && [ "$new_port" = "$SVC_TARGET_PORT" ]; then
+        msg "Параметры не изменились."
+        pause
+        return
+    fi
+
+    printf "\n"
+    draw_separator
+    printf "  ${DIM}Было:${NC}   $SVC_TARGET_HOST:$SVC_TARGET_PORT\n"
+    printf "  ${GREEN}Стало:${NC}  $new_host:$new_port\n"
+    draw_separator
+
+    prompt "Применить изменения? (д/н) [д]: "
+    case "${REPLY:-д}" in
+        д|Д|y|Y|да|yes) ;;
+        *) msg "Отменено"; pause; return ;;
+    esac
+
+    printf "\n"
+    msg "Применяю изменения..."
+
+    # Остановить туннель если запущен
+    local was_running=0
+    if is_running "$name"; then
+        was_running=1
+        do_stop_service "$name"
+    fi
+
+    # Обновить конфиг сервиса
+    sed -i "s|SVC_TARGET_HOST=\".*\"|SVC_TARGET_HOST=\"$new_host\"|" "$SERVICES_DIR/$name.conf"
+    sed -i "s|SVC_TARGET_PORT=\".*\"|SVC_TARGET_PORT=\"$new_port\"|" "$SERVICES_DIR/$name.conf"
+
+    msg "Конфигурация обновлена."
+
+    # Перезапустить туннель если он был запущен
+    if [ "$was_running" -eq 1 ]; then
+        msg "Перезапускаю туннель..."
+        load_service "$name" || { pause; return; }
+        do_start_service "$name"
+    fi
+
+    msg "Сервис '$name' успешно обновлён!"
     pause
 }
 
@@ -724,13 +825,12 @@ select_service() {
         return 1
     fi
 
-    local all_idx=$((idx + 1))
-    printf "  ${BOLD}%d)${NC}  Все сервисы\n" "$all_idx"
-    printf "  ${BOLD}0)${NC}  Назад\n"
+    printf "  ${BOLD}903)${NC} Все сервисы\n"
+    printf "  ${BOLD}0)${NC}   Назад\n"
     prompt "Выберите сервис: "
 
     [ "$REPLY" = "0" ] && { SELECTED_SERVICE=""; return 1; }
-    if [ "$REPLY" = "$all_idx" ]; then
+    if [ "$REPLY" = "903" ]; then
         SELECTED_SERVICE="__ALL__"
         return 0
     fi
@@ -912,18 +1012,16 @@ do_setup() {
             printf "  ${YELLOW}Нет настроенных VPS серверов.${NC}\n"
         fi
 
-        local n_idx=$((idx + 1))
-        local d_idx=$((idx + 2))
         draw_separator
-        printf "  ${BOLD}%d)${NC}  ➕  Добавить новый VPS\n" "$n_idx"
-        [ "$idx" -gt 0 ] && printf "  ${BOLD}%d)${NC}  ❌  Удалить VPS\n" "$d_idx"
-        printf "  ${BOLD}0)${NC}  Назад\n"
+        printf "  ${BOLD}901)${NC} ➕  Добавить новый VPS\n"
+        [ "$idx" -gt 0 ] && printf "  ${BOLD}902)${NC} ❌  Удалить VPS\n"
+        printf "  ${BOLD}0)${NC}   Назад\n"
         
         prompt "Выберите действие: "
         case "$REPLY" in
             0) return ;;
-            "$n_idx") do_add_vps ;;
-            "$d_idx") [ "$idx" -gt 0 ] && do_delete_vps_interactive "$vps_list" ;;
+            901) do_add_vps ;;
+            902) [ "$idx" -gt 0 ] && do_delete_vps_interactive "$vps_list" ;;
             [1-9]*)
                 local sel_vps=$(echo "$vps_list" | cut -d' ' -f"$REPLY")
                 [ -n "$sel_vps" ] && do_add_vps "$sel_vps"
