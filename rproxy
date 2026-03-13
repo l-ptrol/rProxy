@@ -3,7 +3,7 @@
 # Публикация локальных сервисов через SSH-туннели + nginx на VPS
 # http://5.104.75.50:3000/Petro1990/rProxy
 
-VERSION="1.4.7"
+VERSION="1.4.8"
 CONF_DIR="/opt/etc/rproxy"
 CONF_FILE="$CONF_DIR/rproxy.conf"
 SERVICES_DIR="$CONF_DIR/services"
@@ -120,9 +120,9 @@ VPS_PASS="$VPS_PASS"
 EOF
             # Очищаем rproxy.conf от старых системных переменных, НО сохраняем новые
             local tmp_conf="/tmp/rproxy.conf.tmp"
-            echo "CERTBOT_EMAIL=\"$CERTBOT_EMAIL\"" > "$tmp_conf"
-            [ -n "$DEFAULT_AUTH_USER" ] && echo "DEFAULT_AUTH_USER=\"$DEFAULT_AUTH_USER\"" >> "$tmp_conf"
-            [ -n "$DEFAULT_AUTH_PASS" ] && echo "DEFAULT_AUTH_PASS=\"$DEFAULT_AUTH_PASS\"" >> "$tmp_conf"
+            printf "CERTBOT_EMAIL='%s'\n" "$CERTBOT_EMAIL" > "$tmp_conf"
+            [ -n "$DEFAULT_AUTH_USER" ] && printf "DEFAULT_AUTH_USER='%s'\n" "$DEFAULT_AUTH_USER" >> "$tmp_conf"
+            [ -n "$DEFAULT_AUTH_PASS" ] && printf "DEFAULT_AUTH_PASS='%s'\n" "$DEFAULT_AUTH_PASS" >> "$tmp_conf"
             mv "$tmp_conf" "$CONF_FILE"
         fi
         [ -f "$VPS_DIR/default.conf" ] && chmod 600 "$VPS_DIR/default.conf"
@@ -217,7 +217,8 @@ gen_htpasswd() {
         local hash=$(openssl passwd -apr1 "$pass")
         echo "$user:$hash"
     else
-        # Запасной вариант если openssl нет (обычный текст, Nginx его понимает)
+        warn "Утилита 'openssl' не найдена! Пароль будет сохранен в открытом виде (Nginx может его не принять)."
+        warn "Рекомендуется: opkg update && opkg install openssl-util"
         echo "$user:$pass"
     fi
 }
@@ -1266,14 +1267,10 @@ do_change_auth_defaults() {
 
     [ -z "$pass" ] && { warn "Пароль не может быть пустым"; pause; return; }
 
-    # Безопасное сохранение (заменяем двойные кавычки и $ для предотвращения инъекций)
-    local s_user=$(echo "$user" | sed 's/"/\\"/g; s/\$/\\\$/g')
-    local s_pass=$(echo "$pass" | sed 's/"/\\"/g; s/\$/\\\$/g')
-
     sed -i "/DEFAULT_AUTH_USER=/d" "$CONF_FILE"
     sed -i "/DEFAULT_AUTH_PASS=/d" "$CONF_FILE"
-    echo "DEFAULT_AUTH_USER=\"$s_user\"" >> "$CONF_FILE"
-    echo "DEFAULT_AUTH_PASS=\"$s_pass\"" >> "$CONF_FILE"
+    printf "DEFAULT_AUTH_USER='%s'\n" "$user" >> "$CONF_FILE"
+    printf "DEFAULT_AUTH_PASS='%s'\n" "$pass" >> "$CONF_FILE"
     
     msg "Данные успешно сохранены"
     DEFAULT_AUTH_USER="$user"
