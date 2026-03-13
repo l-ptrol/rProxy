@@ -3,7 +3,7 @@
 # Публикация локальных сервисов через SSH-туннели + nginx на VPS
 # http://5.104.75.50:3000/Petro1990/rProxy
 
-VERSION="1.6.4"
+VERSION="1.6.5"
 export PATH="/opt/bin:/opt/sbin:$PATH"
 CONF_DIR="/opt/etc/rproxy"
 CONF_FILE="$CONF_DIR/rproxy.conf"
@@ -68,21 +68,7 @@ check_conf() {
     return 1
 }
 
-load_service() {
-    local svc_file="$SERVICES_DIR/$1.conf"
-    if [ ! -f "$svc_file" ]; then
-        err "Сервис '$1' не найден"
-        return 1
-    fi
-    . "$svc_file"
-    # При загрузке сервиса также загружаем его VPS
-    if [ -n "$SVC_VPS" ]; then
-        load_vps "$SVC_VPS" || return 1
-    else
-        # Обратная совместимость: если VPS не указан, пробуем default
-        load_vps "default" || return 1
-    fi
-}
+
 
 load_vps() {
     local vps_id="$1"
@@ -636,66 +622,7 @@ do_add_interactive() {
 # ══════════════════════════════════════════════════════════════════════
 # РЕДАКТИРОВАТЬ СЕРВИС
 # ══════════════════════════════════════════════════════════════════════
-do_edit_interactive() {
-    clear_screen
-    draw_box "Редактировать сервис"
-    printf "\n"
 
-    select_service "Выберите сервис для редактирования" "all" || { pause; return; }
-    local name="$SELECTED_SERVICE"
-    [ "$name" = "__ALL__" ] && { warn "Выберите конкретный сервис"; pause; return; }
-
-    load_service "$name" || { pause; return; }
-
-    header "Редактирование: $name"
-    printf "  ${DIM}Текущая цель:${NC}  $SVC_TARGET_HOST:$SVC_TARGET_PORT\n\n"
-
-    prompt "Новый IP адрес [$SVC_TARGET_HOST]: "
-    local new_host="${REPLY:-$SVC_TARGET_HOST}"
-    
-    prompt "Новый внутренний порт [$SVC_TARGET_PORT]: "
-    local new_port="${REPLY:-$SVC_TARGET_PORT}"
-
-    prompt "Сохранить изменения? (д/н) [д]: "
-    [ "${REPLY:-д}" != "д" ] && [ "${REPLY:-д}" != "y" ] && { msg "Отменено"; pause; return; }
-
-    # Обновляем конфиг
-    sed -i "s/SVC_TARGET_HOST=.*/SVC_TARGET_HOST=\"$new_host\"/" "$SERVICES_DIR/$name.conf"
-    sed -i "s/SVC_TARGET_PORT=.*/SVC_TARGET_PORT=\"$new_port\"/" "$SERVICES_DIR/$name.conf"
-
-    # Перегенерация и деплой конфига Nginx на VPS
-    msg "Обновляю конфигурацию Nginx на VPS..."
-    load_service "$name" # Перезагружаем переменные
-    
-    local tmp="/tmp/rproxy_edit_$name.conf"
-    generate_nginx_conf "$name" "$SVC_TARGET_HOST" "$SVC_TARGET_PORT" "$SVC_TUNNEL_PORT" "$SVC_DOMAIN" "$SVC_EXT_PORT" "$SVC_NDM_AUTH" "$tmp"
-
-    scp_cmd "$tmp" "$VPS_USER@$VPS_HOST:$REMOTE_NGINX_DIR/rproxy_$name.conf"
-    rm -f "$tmp"
-    ssh_cmd "nginx -t && systemctl reload nginx" >/dev/null 2>&1
-
-    # SSL если он был настроен - восстанавливаем слушателей 443
-    if [ "$SVC_SSL" = "yes" ]; then
-        msg "Восстанавливаю SSL через Certbot..."
-        ssh_cmd "certbot --nginx -d $SVC_DOMAIN --non-interactive --agree-tos -m $CERTBOT_EMAIL" >/dev/null 2>&1
-    fi
-
-    msg "Настройки обновлены. Перезапускаю туннель..."
-    if is_running "$name"; then
-        do_stop_service "$name"
-        sleep 1
-        # Обновление htpasswd на VPS если включено
-        if [ "$SVC_NDM_AUTH" = "yes" ]; then
-             ssh_cmd "printf '%s\n' '$SVC_HTPASSWD' > /etc/nginx/rproxy_$name.htpasswd"
-        fi
-        do_start_service "$name"
-    else
-        msg "Сервис был остановлен. Настройки вступят в силу при следующем запуске."
-    fi
-
-    msg "Готово!"
-    pause
-}
 
 # ══════════════════════════════════════════════════════════════════════
 # ПОЛУЧИТЬ SSL (Certbot)
@@ -875,8 +802,7 @@ do_edit_interactive() {
 
     load_service "$name" || { pause; return; }
 
-    printf "\n"
-    draw_separator
+    header "Редактирование: $name"
     printf "  ${DIM}Текущие параметры:${NC}\n"
     printf "  Цель:          ${BOLD}$SVC_TARGET_HOST:$SVC_TARGET_PORT${NC}\n"
     printf "  Туннель:       порт ${BOLD}$SVC_TUNNEL_PORT${NC}\n"
@@ -914,7 +840,7 @@ do_edit_interactive() {
     esac
 
     printf "\n"
-    msg "Применяю изменения..."
+    msg "Применяю изменения и обновляю VPS..."
 
     # Остановить туннель если запущен
     local was_running=0
@@ -923,20 +849,37 @@ do_edit_interactive() {
         do_stop_service "$name"
     fi
 
-    # Обновить конфиг сервиса
+    # Обновить локальный конфиг сервиса
     sed -i "s|SVC_TARGET_HOST=\".*\"|SVC_TARGET_HOST=\"$new_host\"|" "$SERVICES_DIR/$name.conf"
     sed -i "s|SVC_TARGET_PORT=\".*\"|SVC_TARGET_PORT=\"$new_port\"|" "$SERVICES_DIR/$name.conf"
 
-    msg "Конфигурация обновлена."
+    # Перезагружаем переменные для деплоя
+    load_service "$name"
+
+    # Перегенерация и деплой конфига Nginx на VPS
+    local tmp="/tmp/rproxy_edit_$name.conf"
+    generate_nginx_conf "$name" "$SVC_TARGET_HOST" "$SVC_TARGET_PORT" "$SVC_TUNNEL_PORT" "$SVC_DOMAIN" "$SVC_EXT_PORT" "$SVC_NDM_AUTH" "$tmp"
+
+    scp_cmd "$tmp" "$VPS_USER@$VPS_HOST:$REMOTE_NGINX_DIR/rproxy_$name.conf"
+    rm -f "$tmp"
+    ssh_cmd "nginx -t && systemctl reload nginx" >/dev/null 2>&1
+
+    # SSL если он был настроен - восстанавливаем слушателей 443
+    if [ "$SVC_SSL" = "yes" ]; then
+        ssh_cmd "certbot --nginx -d $SVC_DOMAIN --non-interactive --agree-tos -m $CERTBOT_EMAIL" >/dev/null 2>&1
+    fi
+
+    # Обновление htpasswd на VPS если включено
+    if [ "$SVC_NDM_AUTH" = "yes" ]; then
+         ssh_cmd "printf '%s\n' '$SVC_HTPASSWD' > /etc/nginx/rproxy_$name.htpasswd"
+    fi
 
     # Перезапустить туннель если он был запущен
     if [ "$was_running" -eq 1 ]; then
-        msg "Перезапускаю туннель..."
-        load_service "$name" || { pause; return; }
         do_start_service "$name"
     fi
 
-    msg "Сервис '$name' успешно обновлён!"
+    msg "Сервис '$name' успешно обновлён локально и на VPS!"
     pause
 }
 
