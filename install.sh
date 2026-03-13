@@ -1,5 +1,5 @@
 #!/bin/sh
-# rProxy Installer for Keenetic Routers (Entware)
+# rProxy Installer for Keenetic / Netcraze Routers (Entware)
 # Usage: curl -sSL https://raw.githubusercontent.com/l-ptrol/rProxy/main/install.sh | sh
 
 set -e
@@ -23,7 +23,7 @@ err()  { printf "${RED}✖${NC} %s\n" "$*" >&2; }
 header() {
     printf "\n"
     printf "${CYAN}${BOLD}╔══════════════════════════════════════════╗${NC}\n"
-    printf "${CYAN}${BOLD}║     rProxy — Installer for Keenetic      ║${NC}\n"
+    printf "${CYAN}${BOLD}║  rProxy — Installer for Keenetic / Netcraze  ║${NC}\n"
     printf "${CYAN}${BOLD}╚══════════════════════════════════════════╝${NC}\n"
     printf "\n"
 }

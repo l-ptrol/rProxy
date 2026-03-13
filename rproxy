@@ -1,5 +1,5 @@
 #!/bin/sh
-# rProxy — Менеджер обратного прокси для роутеров Keenetic
+# rProxy — Менеджер обратного прокси для роутеров Keenetic / Netcraze
 # Публикация локальных сервисов через SSH-туннели + nginx на VPS
 # https://github.com/l-ptrol/rProxy
 
