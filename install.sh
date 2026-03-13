@@ -8,6 +8,7 @@ RED='\033[0;31m'
 GREEN='\033[0;32m'
 CYAN='\033[0;36m'
 BOLD='\033[1m'
+YELLOW='\033[1;33m'
 NC='\033[0m'
 
 REPO_URL="http://5.104.75.50:3000/Petro1990/rProxy/raw/branch/main"
@@ -16,6 +17,7 @@ CONF_DIR="/opt/etc/rproxy"
 INIT_DIR="/opt/etc/init.d"
 
 msg()  { printf "${GREEN}▸${NC} %s\n" "$*"; }
+warn() { printf "${YELLOW}⚠${NC} %s\n" "$*"; }
 err()  { printf "${RED}✖${NC} %s\n" "$*" >&2; }
 
 header() {
