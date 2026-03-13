@@ -57,7 +57,12 @@ install_pkg() {
 install_pkg "openssh-client"
 install_pkg "autossh"
 install_pkg "curl"
-install_pkg "sshpass"
+
+# sshpass is optional (needed only for password auth, may be missing on some architectures)
+if ! opkg list-installed 2>/dev/null | grep -q "^sshpass "; then
+    msg "Пытаюсь установить sshpass (необязательно)..."
+    opkg install "sshpass" >/dev/null 2>&1 || warn "Пакет sshpass не найден. Авторизация по паролю будет недоступна (только по SSH-ключу)."
+fi
 
 # ─── Download rproxy script ─────────────────────────────────────────
 msg "Скачиваю rproxy..."

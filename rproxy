@@ -69,6 +69,11 @@ load_service() {
 
 ssh_cmd() {
     if [ "$VPS_AUTH" = "password" ]; then
+        if ! command -v sshpass >/dev/null 2>&1; then
+            err "Утилита sshpass не найдена. Авторизация по паролю невозможна."
+            err "Пожалуйста, перенастройте rProxy на использование SSH-ключа (rproxy setup)."
+            return 1
+        fi
         sshpass -p "$VPS_PASS" ssh -o StrictHostKeyChecking=no -p "$VPS_PORT" "$VPS_USER@$VPS_HOST" "$@"
     else
         ssh -o StrictHostKeyChecking=no -i "$SSH_KEY" -p "$VPS_PORT" "$VPS_USER@$VPS_HOST" "$@"
@@ -77,6 +82,10 @@ ssh_cmd() {
 
 scp_cmd() {
     if [ "$VPS_AUTH" = "password" ]; then
+        if ! command -v sshpass >/dev/null 2>&1; then
+            err "Утилита sshpass не найдена. Копирование по паролю невозможно."
+            return 1
+        fi
         sshpass -p "$VPS_PASS" scp -o StrictHostKeyChecking=no -P "$VPS_PORT" "$@"
     else
         scp -o StrictHostKeyChecking=no -i "$SSH_KEY" -P "$VPS_PORT" "$@"
@@ -659,19 +668,21 @@ do_setup() {
 
     if [ "$auth_choice" = "2" ]; then
         vps_auth="password"
+        
+        if ! command -v sshpass >/dev/null 2>&1; then
+            printf "\n  ${RED}✖ Ошибка: Утилита sshpass не найдена в системе.${NC}\n"
+            printf "    Для вашего роутера этот пакет недоступен в репозитории.\n"
+            printf "    Пожалуйста, используйте авторизацию по SSH-ключу.\n"
+            pause
+            return
+        fi
+
         printf "  SSH пароль: "
         stty -echo 2>/dev/null
         read -r vps_pass
         stty echo 2>/dev/null
         printf "\n"
 
-        if ! command -v sshpass >/dev/null 2>&1; then
-            msg "Устанавливаю sshpass..."
-            opkg install sshpass 2>/dev/null || {
-                err "Не удалось установить sshpass. Установите вручную: opkg install sshpass"
-                pause
-                return
-            }
         fi
     else
         if [ ! -f "$SSH_KEY" ]; then
