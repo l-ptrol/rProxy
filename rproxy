@@ -3,7 +3,7 @@
 # Публикация локальных сервисов через SSH-туннели + nginx на VPS
 # http://5.104.75.50:3000/Petro1990/rProxy
 
-VERSION="1.4.1"
+VERSION="1.4.2"
 CONF_DIR="/opt/etc/rproxy"
 CONF_FILE="$CONF_DIR/rproxy.conf"
 SERVICES_DIR="$CONF_DIR/services"
@@ -523,12 +523,24 @@ do_add_interactive() {
     case "$REPLY" in
         д|Д|y|Y|да|yes) 
             use_ndm_auth="yes"
-            prompt "Введите имя пользователя [admin]: "
-            local user="${REPLY:-admin}"
-            prompt "Введите пароль для '$user' (можно от роутера): "
-            local pass="$REPLY"
-            [ -z "$pass" ] && { warn "Пароль не может быть пустым"; pause; return; }
-            htpasswd_line=$(gen_htpasswd "$user" "$pass")
+            local def_user="${DEFAULT_AUTH_USER:-admin}"
+            
+            if [ -n "$DEFAULT_AUTH_PASS" ]; then
+                printf "  ${DIM}Будут использованы сохраненные данные: $def_user / *****${NC}\n"
+                prompt "Использовать их? (д/н) [д]: "
+                if [ "${REPLY:-д}" = "д" ] || [ "${REPLY:-д}" = "y" ]; then
+                    htpasswd_line=$(gen_htpasswd "$def_user" "$DEFAULT_AUTH_PASS")
+                fi
+            fi
+
+            if [ -z "$htpasswd_line" ]; then
+                prompt "Введите имя пользователя [$def_user]: "
+                local user="${REPLY:-$def_user}"
+                prompt "Введите пароль для '$user': "
+                local pass="$REPLY"
+                [ -z "$pass" ] && { warn "Пароль не может быть пустым"; pause; return; }
+                htpasswd_line=$(gen_htpasswd "$user" "$pass")
+            fi
             ;;
     esac
 
@@ -1200,6 +1212,7 @@ do_setup() {
         draw_separator
         printf "  ${BOLD}901)${NC} ➕  Добавить новый VPS\n"
         [ "$idx" -gt 0 ] && printf "  ${BOLD}902)${NC} ❌  Удалить VPS\n"
+        printf "  ${BOLD}903)${NC} 🔑  Пароль публикации по умолчанию\n"
         printf "  ${BOLD}0)${NC}   Назад\n"
         
         prompt "Выберите действие: "
@@ -1207,6 +1220,7 @@ do_setup() {
             0) return ;;
             901) do_add_vps ;;
             902) [ "$idx" -gt 0 ] && do_delete_vps_interactive "$vps_list" ;;
+            903) do_change_auth_defaults ;;
             [1-9]*)
                 local sel_vps=$(echo "$vps_list" | cut -d' ' -f"$REPLY")
                 [ -n "$sel_vps" ] && do_add_vps "$sel_vps"
@@ -1226,6 +1240,35 @@ do_delete_vps_interactive() {
         д|Д|y|Y) rm -f "$VPS_DIR/$sel_vps.conf"; msg "Удалено" ;;
         *) msg "Отменено" ;;
     esac
+    pause
+}
+
+do_change_auth_defaults() {
+    draw_box "Настройки публикации (Basic Auth)"
+    printf "\n"
+    printf "  Эти данные будут предлагаться при защите новых сервисов.\n"
+    
+    prompt "Имя пользователя [${DEFAULT_AUTH_USER:-admin}]: "
+    local user="${REPLY:-${DEFAULT_AUTH_USER:-admin}}"
+    
+    prompt "Пароль (оставьте пустым чтобы не менять): "
+    local pass="$REPLY"
+    
+    if [ -z "$pass" ] && [ -n "$DEFAULT_AUTH_PASS" ]; then
+        pass="$DEFAULT_AUTH_PASS"
+    fi
+
+    [ -z "$pass" ] && { warn "Пароль не может быть пустым"; pause; return; }
+
+    # Сохраняем в конфиг
+    sed -i "/DEFAULT_AUTH_USER=/d" "$CONF_FILE"
+    sed -i "/DEFAULT_AUTH_PASS=/d" "$CONF_FILE"
+    echo "DEFAULT_AUTH_USER=\"$user\"" >> "$CONF_FILE"
+    echo "DEFAULT_AUTH_PASS=\"$pass\"" >> "$CONF_FILE"
+    
+    msg "Данные успешно сохранены!"
+    DEFAULT_AUTH_USER="$user"
+    DEFAULT_AUTH_PASS="$pass"
     pause
 }
 
