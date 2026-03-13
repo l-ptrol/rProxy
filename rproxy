@@ -3,7 +3,7 @@
 # Публикация локальных сервисов через SSH-туннели + nginx на VPS
 # http://5.104.75.50:3000/Petro1990/rProxy
 
-VERSION="1.1.4"
+VERSION="1.2.0"
 CONF_DIR="/opt/etc/rproxy"
 CONF_FILE="$CONF_DIR/rproxy.conf"
 SERVICES_DIR="$CONF_DIR/services"
@@ -240,6 +240,7 @@ main_menu() {
         printf "  ${BOLD}6)${NC}  ⏹️   Остановить туннель\n"
         printf "  ${BOLD}7)${NC}  🔄  Перезапустить туннель\n"
         draw_separator
+        draw_separator
         printf "  ${BOLD}8)${NC}  🔒  Получить/Обновить SSL (Certbot)\n"
         printf "  ${BOLD}9)${NC}  ⚙️   Настройки VPS\n"
         printf "  ${BOLD}10)${NC} 🚀  Обновить rProxy\n"
@@ -356,6 +357,7 @@ select_vps_interactive() {
         vps_list="$vps_list $(basename "$f" .conf)"
     done
     
+    draw_separator
     printf "  ${BOLD}901)${NC} ➕  Добавить новый VPS\n"
     printf "  ${BOLD}0)${NC}   Назад\n"
     prompt "Выберите номер: "
@@ -472,16 +474,21 @@ do_add_interactive() {
         cat > "$tmp" << NGINXEOF
 server {
     listen 80;
-    server_name $domain;
+    server_name "$domain";
+
+    proxy_buffering off;
+
     location / {
         proxy_pass http://127.0.0.1:$tunnel_port;
         proxy_http_version 1.1;
         proxy_set_header Upgrade \$http_upgrade;
         proxy_set_header Connection "upgrade";
-        proxy_set_header Host $t_host:$t_port;
+        proxy_set_header Host "\$host";
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_set_header X-Forwarded-Host \$host;
+        proxy_set_header X-Forwarded-Port \$server_port;
         proxy_connect_timeout 60s;
         proxy_send_timeout 60s;
         proxy_read_timeout 60s;
@@ -492,15 +499,20 @@ NGINXEOF
         cat > "$tmp" << NGINXEOF
 server {
     listen $ext_port;
+
+    proxy_buffering off;
+
     location / {
         proxy_pass http://127.0.0.1:$tunnel_port;
         proxy_http_version 1.1;
         proxy_set_header Upgrade \$http_upgrade;
         proxy_set_header Connection "upgrade";
-        proxy_set_header Host $t_host:$t_port;
+        proxy_set_header Host "\$host";
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_set_header X-Forwarded-Host \$host;
+        proxy_set_header X-Forwarded-Port \$server_port;
         proxy_connect_timeout 60s;
         proxy_send_timeout 60s;
         proxy_read_timeout 60s;
@@ -860,6 +872,7 @@ select_service() {
         return 1
     fi
 
+    draw_separator
     printf "  ${BOLD}903)${NC} Все сервисы\n"
     printf "  ${BOLD}0)${NC}   Назад\n"
     prompt "Выберите сервис: "
