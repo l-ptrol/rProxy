@@ -3,7 +3,7 @@
 # Публикация локальных сервисов через SSH-туннели + nginx на VPS
 # http://5.104.75.50:3000/Petro1990/rProxy
 
-VERSION="1.6.0"
+VERSION="1.6.1"
 export PATH="/opt/bin:/opt/sbin:$PATH"
 CONF_DIR="/opt/etc/rproxy"
 CONF_FILE="$CONF_DIR/rproxy.conf"
@@ -460,7 +460,7 @@ do_add_interactive() {
     printf "\n"
 
     prompt "Название сервиса (латиницей, без пробелов): "
-    local name=$(echo "$REPLY" | tr ' ' '_' | tr -cd '[:alnum:]_-')
+    local name=$(echo "$REPLY" | tr '[:upper:]' '[:lower:]' | tr ' ' '_' | tr -cd '[:alnum:]_-')
     [ -z "$name" ] && { warn "Название не может быть пустым"; pause; return; }
 
     if [ -f "$SERVICES_DIR/$name.conf" ]; then
@@ -482,8 +482,19 @@ do_add_interactive() {
 
     if [ "$mode" = "1" ]; then
         prompt "Доменное имя (например, mysite.example.com): "
-        domain="$REPLY"
+        domain=$(echo "$REPLY" | tr '[:upper:]' '[:lower:]')
         [ -z "$domain" ] && { warn "Домен не указан"; pause; return; }
+        
+        # Проверка на дубликаты доменов
+        for f in "$SERVICES_DIR"/*.conf; do
+            [ -f "$f" ] || continue
+            if grep -q "SVC_DOMAIN=\"$domain\"" "$f"; then
+                local conflict=$(basename "$f" .conf)
+                err "Домен '$domain' уже используется сервисом '$conflict'"
+                pause; return
+            fi
+        done
+
         use_ssl="yes"; ext_port=443
         
         if [ -z "$CERTBOT_EMAIL" ]; then
@@ -738,6 +749,83 @@ do_edit_interactive() {
     # Обновляем конфиг
     sed -i "s/SVC_TARGET_HOST=.*/SVC_TARGET_HOST=\"$new_host\"/" "$SERVICES_DIR/$name.conf"
     sed -i "s/SVC_TARGET_PORT=.*/SVC_TARGET_PORT=\"$new_port\"/" "$SERVICES_DIR/$name.conf"
+
+    # Перегенерация и деплой конфига Nginx на VPS (важно для стелс-режима и портов)
+    msg "Обновляю конфигурацию Nginx на VPS..."
+    load_service "$name" # Перезагружаем переменные
+    
+    local t_host="$SVC_TARGET_HOST"
+    local t_port="$SVC_TARGET_PORT"
+    local tunnel_port="$SVC_TUNNEL_PORT"
+    local domain="$SVC_DOMAIN"
+    local ext_port="$SVC_EXT_PORT"
+    local use_ssl="$SVC_SSL"
+    local use_ndm_auth="$SVC_NDM_AUTH"
+    local htpasswd_line="$SVC_HTPASSWD"
+    
+    # Генерация заново
+    local stealth_host="$t_host"
+    [ "$t_port" != "80" ] && stealth_host="$t_host:$t_port"
+    
+    local auth_config=""
+    if [ "$use_ndm_auth" = "yes" ]; then
+        auth_config="
+    auth_basic \"Restricted Access\";
+    auth_basic_user_file /etc/nginx/rproxy_$name.htpasswd;
+    "
+    fi
+    
+    local tmp="/tmp/rproxy_edit_$name.conf"
+    # (Здесь должна быть логика генерации как в do_add_interactive)
+    # Для краткости вызовем внутреннюю функцию или повторим блок
+    if [ -n "$domain" ]; then
+        cat > "$tmp" << NGINXEOF
+server {
+    listen 80;
+    server_name "$domain";
+    proxy_buffering off;
+    proxy_request_buffering off;
+    location / {
+        $auth_config
+        proxy_pass http://127.0.0.1:$tunnel_port;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host "$stealth_host";
+        proxy_set_header Origin "http://$stealth_host";
+        proxy_set_header Referer "http://$stealth_host/";
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_cookie_domain "$t_host" "\$host";
+    }
+}
+NGINXEOF
+    else
+        cat > "$tmp" << NGINXEOF
+server {
+    listen $ext_port;
+    proxy_buffering off;
+    proxy_request_buffering off;
+    location / {
+        $auth_config
+        proxy_pass http://127.0.0.1:$tunnel_port;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host "$stealth_host";
+        proxy_set_header Origin "http://$stealth_host";
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_cookie_domain "$t_host" "\$host";
+    }
+}
+NGINXEOF
+    fi
+
+    scp_cmd "$tmp" "$VPS_USER@$VPS_HOST:$REMOTE_NGINX_DIR/rproxy_$name.conf"
+    rm -f "$tmp"
+    ssh_cmd "nginx -t && systemctl reload nginx" >/dev/null 2>&1
 
     msg "Настройки обновлены. Перезапускаю туннель..."
     if is_running "$name"; then
@@ -1357,7 +1445,9 @@ EOF
     VPS_HOST="$v_host" VPS_PORT="$v_port" VPS_USER="$v_user" VPS_AUTH="key"
     ssh_cmd "
         if ! command -v nginx >/dev/null 2>&1; then
-            apt-get update -qq && apt-get install -y -qq nginx || (yum update -y && yum install -y nginx)
+            apt-get update -qq && apt-get install -y -qq nginx psmisc || (yum update -y && yum install -y nginx psmisc)
+        else
+            apt-get update -qq && apt-get install -y -qq psmisc || yum install -y psmisc
         fi
         mkdir -p /etc/nginx/sites-enabled
         grep -q 'sites-enabled' /etc/nginx/nginx.conf || sed -i '/http {/a\    include /etc/nginx/sites-enabled/*.conf;' /etc/nginx/nginx.conf
