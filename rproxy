@@ -263,7 +263,7 @@ do_add_interactive() {
     [ -z "$target" ] && { warn "Адрес не может быть пустым"; pause; return; }
 
     printf "\n  Привязать к домену?\n"
-    printf "  ${BOLD}1)${NC} Да — указать доменное имя (порт 80)\n"
+    printf "  ${BOLD}1)${NC} Да — указать доменное имя (порт 443)\n"
     printf "  ${BOLD}2)${NC} Нет — указать внешний порт\n"
     prompt "Выберите [2]: "
     local mode="${REPLY:-2}"
@@ -276,24 +276,17 @@ do_add_interactive() {
         prompt "Доменное имя (например, mysite.example.com): "
         domain="$REPLY"
         [ -z "$domain" ] && { warn "Домен не указан"; pause; return; }
-        ext_port=80
         
-        printf "\n  Включить SSL (HTTPS) через Certbot? (д/н) [н]: "
-        read -r use_ssl_ans
-        case "$use_ssl_ans" in
-            д|Д|y|Y|да|yes) 
-                use_ssl="yes" 
-                ext_port=443
-                if [ -z "$CERTBOT_EMAIL" ]; then
-                    prompt "Введите Email для регистрации сертификатов: "
-                    CERTBOT_EMAIL="$REPLY"
-                    # Сохраняем email в конфиг
-                    sed -i "/CERTBOT_EMAIL=/d" "$CONF_FILE"
-                    echo "CERTBOT_EMAIL=\"$CERTBOT_EMAIL\"" >> "$CONF_FILE"
-                fi
-                ;;
-            *) use_ssl="no" ;;
-        esac
+        # SSL теперь всегда включен для доменов по запросу пользователя
+        use_ssl="yes" 
+        ext_port=443
+        if [ -z "$CERTBOT_EMAIL" ]; then
+            prompt "Введите Email для регистрации сертификатов (Certbot): "
+            CERTBOT_EMAIL="$REPLY"
+            # Сохраняем email в конфиг
+            sed -i "/CERTBOT_EMAIL=/d" "$CONF_FILE"
+            echo "CERTBOT_EMAIL=\"$CERTBOT_EMAIL\"" >> "$CONF_FILE"
+        fi
     else
         local suggested
         suggested=$(next_free_port)
@@ -474,6 +467,9 @@ do_ssl_interactive() {
         # Обновляем конфиг сервиса
         sed -i "s/SVC_SSL=.*/SVC_SSL=\"yes\"/" "$SERVICES_DIR/$name.conf"
         sed -i "s/SVC_EXT_PORT=.*/SVC_EXT_PORT=\"443\"/" "$SERVICES_DIR/$name.conf"
+        
+        # Проверка автопродления (добавляем таймер/крон если нет)
+        ssh_cmd "systemctl is-active certbot.timer >/dev/null 2>&1 || (crontab -l 2>/dev/null | grep -q certbot || (crontab -l 2>/dev/null; echo \"0 0,12 * * * certbot renew -q\") | crontab -)"
     else
         err "Certbot не смог выпустить сертификат"
         warn "Убедитесь, что домен $SVC_DOMAIN указывает на этот VPS и порт 80 открыт"
