@@ -68,19 +68,25 @@ load_service() {
 }
 
 ssh_cmd() {
+    local ssh_exec="/opt/bin/ssh"
+    [ ! -f "$ssh_exec" ] && ssh_exec="ssh"
+
     if [ "$VPS_AUTH" = "password" ]; then
         if ! command -v sshpass >/dev/null 2>&1; then
             err "Утилита sshpass не найдена. Авторизация по паролю невозможна."
             err "Пожалуйста, перенастройте rProxy на использование SSH-ключа (rproxy setup)."
             return 1
         fi
-        sshpass -p "$VPS_PASS" ssh -o StrictHostKeyChecking=no -p "$VPS_PORT" "$VPS_USER@$VPS_HOST" "$@"
+        sshpass -p "$VPS_PASS" $ssh_exec -o StrictHostKeyChecking=no -p "$VPS_PORT" "$VPS_USER@$VPS_HOST" "$@"
     else
-        ssh -o StrictHostKeyChecking=no -i "$SSH_KEY" -p "$VPS_PORT" "$VPS_USER@$VPS_HOST" "$@"
+        $ssh_exec -o StrictHostKeyChecking=no -i "$SSH_KEY" -p "$VPS_PORT" "$@"
     fi
 }
 
 scp_cmd() {
+    local scp_exec="/opt/bin/scp"
+    [ ! -f "$scp_exec" ] && scp_exec="scp"
+
     if [ "$VPS_AUTH" = "password" ]; then
         if ! command -v sshpass >/dev/null 2>&1; then
             err "Утилита sshpass не найдена. Копирование по паролю невозможно."
@@ -563,6 +569,10 @@ do_start_service() {
 
     msg "Запускаю туннель '$name' ($SVC_TARGET_HOST:$SVC_TARGET_PORT → VPS:$SVC_TUNNEL_PORT)..."
 
+    local ssh_exec="/opt/bin/ssh"
+    [ ! -f "$ssh_exec" ] && ssh_exec="ssh"
+    export AUTOSSH_PATH="$ssh_exec"
+
     mkdir -p "$PID_DIR"
     local pid_file
     pid_file=$(get_pid_file "$name")
@@ -657,6 +667,9 @@ do_setup() {
     prompt "SSH пользователь [root]: "
     local vps_user="${REPLY:-root}"
 
+    local ssh_exec="/opt/bin/ssh"
+    [ ! -f "$ssh_exec" ] && ssh_exec="ssh"
+
     printf "\n  Метод авторизации:\n"
     printf "  ${BOLD}1)${NC} SSH-ключ (рекомендуется)\n"
     printf "  ${BOLD}2)${NC} Пароль\n"
@@ -689,20 +702,28 @@ do_setup() {
         if [ ! -f "$SSH_KEY" ]; then
             msg "Генерирую SSH-ключ..."
             mkdir -p "$CONF_DIR"
-            # Попытка с универсальными параметрами
-            if ! ssh-keygen -t rsa -b 2048 -f "$SSH_KEY" -N "" -q 2>/dev/null; then
-                # Попытка для Dropbear (использует -s вместо -b)
-                if ! ssh-keygen -t rsa -s 2048 -f "$SSH_KEY" -N "" 2>/dev/null; then
-                    # Минимальный набор флагов
-                    ssh-keygen -t rsa -f "$SSH_KEY" -N ""
+            
+            # Предпочтительно используем полный путь к OpenSSH из Entware
+            local keygen_cmd="/opt/bin/ssh-keygen"
+            [ ! -f "$keygen_cmd" ] && keygen_cmd="ssh-keygen"
+
+            # 1. Попытка создания OpenSSH ключа (современный формат)
+            if ! $keygen_cmd -t rsa -b 2048 -f "$SSH_KEY" -N "" -q 2>/dev/null; then
+                # 2. Попытка для Dropbear (флаг -s вместо -b)
+                if ! $keygen_cmd -t rsa -s 2048 -f "$SSH_KEY" -N "" 2>/dev/null; then
+                    # 3. Минимально возможный набор флагов
+                    $keygen_cmd -t rsa -f "$SSH_KEY" -N ""
                 fi
             fi
             
-            # Если .pub файл не создался автоматически (бывает в Dropbear), извлекаем его
+            # Извлекаем публичный ключ, если он не создался (особенности Dropbear)
             if [ ! -f "$SSH_KEY.pub" ] && [ -f "$SSH_KEY" ]; then
-                ssh-keygen -y -f "$SSH_KEY" > "$SSH_KEY.pub" 2>/dev/null
+                # Dropbear -y может выводить лишний текст, берем только строку начинающуюся с ssh-rsa
+                $keygen_cmd -y -f "$SSH_KEY" 2>/dev/null | grep "^ssh-rsa" > "$SSH_KEY.pub"
             fi
             
+            # Проверка формата: если ключ Dropbear, а клиент OpenSSH — может потребоваться конвертация
+            # Но обычно если мы в Entware, /opt/bin/ssh должен понимать PEM
             if [ -f "$SSH_KEY" ]; then
                 chmod 600 "$SSH_KEY"
                 msg "Ключ создан: $SSH_KEY"
@@ -718,7 +739,7 @@ do_setup() {
     printf "\n"
     msg "Проверяю подключение к $vps_host..."
     if [ "$vps_auth" = "password" ]; then
-        if ! sshpass -p "$vps_pass" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 \
+        if ! sshpass -p "$vps_pass" $ssh_exec -o StrictHostKeyChecking=no -o ConnectTimeout=10 \
             -p "$vps_port" "$vps_user@$vps_host" "echo ok" >/dev/null 2>&1; then
             err "Не удалось подключиться к VPS. Проверьте параметры."
             pause
@@ -731,13 +752,17 @@ do_setup() {
             pause
             return
         fi
+        
+        local copy_id_exec="/opt/bin/ssh-copy-id"
+        [ ! -f "$copy_id_exec" ] && copy_id_exec="ssh-copy-id"
+
         printf "  Введите пароль VPS для копирования ключа:\n"
-        ssh-copy-id -i "$SSH_KEY.pub" -p "$vps_port" "$vps_user@$vps_host" 2>/dev/null || {
-            cat "$SSH_KEY.pub" | ssh -o StrictHostKeyChecking=no -p "$vps_port" "$vps_user@$vps_host" \
+        $copy_id_exec -i "$SSH_KEY.pub" -p "$vps_port" "$vps_user@$vps_host" 2>/dev/null || {
+            cat "$SSH_KEY.pub" | $ssh_exec -o StrictHostKeyChecking=no -p "$vps_port" "$vps_user@$vps_host" \
                 "mkdir -p ~/.ssh && cat >> ~/.ssh/authorized_keys && chmod 700 ~/.ssh && chmod 600 ~/.ssh/authorized_keys"
         }
 
-        if ! ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 \
+        if ! $ssh_exec -o StrictHostKeyChecking=no -o ConnectTimeout=10 \
             -i "$SSH_KEY" -p "$vps_port" "$vps_user@$vps_host" "echo ok" >/dev/null 2>&1; then
             err "Не удалось подключиться к VPS по ключу."
             pause
