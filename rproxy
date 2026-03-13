@@ -3,7 +3,7 @@
 # Публикация локальных сервисов через SSH-туннели + nginx на VPS
 # http://5.104.75.50:3000/Petro1990/rProxy
 
-VERSION="1.4.3"
+VERSION="1.4.4"
 CONF_DIR="/opt/etc/rproxy"
 CONF_FILE="$CONF_DIR/rproxy.conf"
 SERVICES_DIR="$CONF_DIR/services"
@@ -61,7 +61,7 @@ check_conf() {
     # Строгая проверка: ищем хотя бы один файл в vps/, в котором заполнена переменная VPS_HOST
     for f in "$VPS_DIR"/*.conf; do
         [ -f "$f" ] || continue
-        if grep -q "VPS_HOST=\"[0-9]" "$f"; then
+        if grep -qE "VPS_HOST=['\"]?[0-9]" "$f"; then
             return 0
         fi
     done
@@ -106,7 +106,7 @@ migrate_config() {
 
     if [ -f "$CONF_FILE" ] && { [ ! -f "$VPS_DIR/default.conf" ] || [ "$broken" -eq 1 ]; }; then
         # Если rproxy.conf ещё содержит данные серверов (не пустой)
-        if grep -q "VPS_HOST=\"[0-9]" "$CONF_FILE"; then
+        if grep -q "VPS_HOST=" "$CONF_FILE"; then
             msg "Восстановление конфигурации VPS..."
             . "$CONF_FILE"
             cat > "$VPS_DIR/default.conf" <<EOF
@@ -116,11 +116,12 @@ VPS_USER="$VPS_USER"
 VPS_AUTH="$VPS_AUTH"
 VPS_PASS="$VPS_PASS"
 EOF
-            # Очищаем rproxy.conf от старых системных переменных
-            cat > "$CONF_FILE.tmp" <<EOF
-CERTBOT_EMAIL="$CERTBOT_EMAIL"
-EOF
-            mv "$CONF_FILE.tmp" "$CONF_FILE"
+            # Очищаем rproxy.conf от старых системных переменных, НО сохраняем новые
+            local tmp_conf="/tmp/rproxy.conf.tmp"
+            echo "CERTBOT_EMAIL=\"$CERTBOT_EMAIL\"" > "$tmp_conf"
+            [ -n "$DEFAULT_AUTH_USER" ] && echo "DEFAULT_AUTH_USER=\"$DEFAULT_AUTH_USER\"" >> "$tmp_conf"
+            [ -n "$DEFAULT_AUTH_PASS" ] && echo "DEFAULT_AUTH_PASS=\"$DEFAULT_AUTH_PASS\"" >> "$tmp_conf"
+            mv "$tmp_conf" "$CONF_FILE"
         fi
         [ -f "$VPS_DIR/default.conf" ] && chmod 600 "$VPS_DIR/default.conf"
     fi
@@ -1264,13 +1265,16 @@ do_change_auth_defaults() {
 
     [ -z "$pass" ] && { warn "Пароль не может быть пустым"; pause; return; }
 
-    # Безопасное сохранение (одинарные кавычки предотвращают расширение $ внутри пароля)
+    # Безопасное сохранение (заменяем двойные кавычки и $ для предотвращения инъекций)
+    local s_user=$(echo "$user" | sed 's/"/\\"/g; s/\$/\\\$/g')
+    local s_pass=$(echo "$pass" | sed 's/"/\\"/g; s/\$/\\\$/g')
+
     sed -i "/DEFAULT_AUTH_USER=/d" "$CONF_FILE"
     sed -i "/DEFAULT_AUTH_PASS=/d" "$CONF_FILE"
-    printf "DEFAULT_AUTH_USER='%s'\n" "$user" >> "$CONF_FILE"
-    printf "DEFAULT_AUTH_PASS='%s'\n" "$pass" >> "$CONF_FILE"
+    echo "DEFAULT_AUTH_USER=\"$s_user\"" >> "$CONF_FILE"
+    echo "DEFAULT_AUTH_PASS=\"$s_pass\"" >> "$CONF_FILE"
     
-    msg "Данные успешно сохранены в $CONF_FILE"
+    msg "Данные успешно сохранены"
     DEFAULT_AUTH_USER="$user"
     DEFAULT_AUTH_PASS="$pass"
     pause
