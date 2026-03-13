@@ -689,8 +689,28 @@ do_setup() {
         if [ ! -f "$SSH_KEY" ]; then
             msg "Генерирую SSH-ключ..."
             mkdir -p "$CONF_DIR"
-            ssh-keygen -t rsa -b 4096 -f "$SSH_KEY" -N "" -q
-            msg "Ключ создан: $SSH_KEY"
+            # Попытка с универсальными параметрами
+            if ! ssh-keygen -t rsa -b 2048 -f "$SSH_KEY" -N "" -q 2>/dev/null; then
+                # Попытка для Dropbear (использует -s вместо -b)
+                if ! ssh-keygen -t rsa -s 2048 -f "$SSH_KEY" -N "" 2>/dev/null; then
+                    # Минимальный набор флагов
+                    ssh-keygen -t rsa -f "$SSH_KEY" -N ""
+                fi
+            fi
+            
+            # Если .pub файл не создался автоматически (бывает в Dropbear), извлекаем его
+            if [ ! -f "$SSH_KEY.pub" ] && [ -f "$SSH_KEY" ]; then
+                ssh-keygen -y -f "$SSH_KEY" > "$SSH_KEY.pub" 2>/dev/null
+            fi
+            
+            if [ -f "$SSH_KEY" ]; then
+                chmod 600 "$SSH_KEY"
+                msg "Ключ создан: $SSH_KEY"
+            else
+                err "Не удалось создать SSH-ключ"
+                pause
+                return
+            fi
         fi
     fi
 
@@ -706,10 +726,15 @@ do_setup() {
         fi
     else
         msg "Копирую SSH-ключ на VPS..."
+        if [ ! -f "$SSH_KEY.pub" ]; then
+            err "Публичный ключ не найден: $SSH_KEY.pub"
+            pause
+            return
+        fi
         printf "  Введите пароль VPS для копирования ключа:\n"
         ssh-copy-id -i "$SSH_KEY.pub" -p "$vps_port" "$vps_user@$vps_host" 2>/dev/null || {
-            cat "$SSH_KEY.pub" | ssh -p "$vps_port" "$vps_user@$vps_host" \
-                "mkdir -p ~/.ssh && cat >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys"
+            cat "$SSH_KEY.pub" | ssh -o StrictHostKeyChecking=no -p "$vps_port" "$vps_user@$vps_host" \
+                "mkdir -p ~/.ssh && cat >> ~/.ssh/authorized_keys && chmod 700 ~/.ssh && chmod 600 ~/.ssh/authorized_keys"
         }
 
         if ! ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 \
