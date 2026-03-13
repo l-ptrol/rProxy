@@ -526,7 +526,7 @@ do_remove_interactive() {
         local st="○"
         is_running "$SVC_NAME" && st="●"
         printf "  ${BOLD}%d)${NC}  %s  %s  (%s:%s)\n" "$idx" "$st" "$SVC_NAME" "$SVC_TARGET_HOST" "$SVC_TARGET_PORT"
-        services="$services $SVC_NAME"
+        [ -z "$services" ] && services="$SVC_NAME" || services="$services $SVC_NAME"
     done
 
     if [ "$idx" -eq 0 ]; then
@@ -542,7 +542,7 @@ do_remove_interactive() {
     [ -z "$REPLY" ] && return
 
     local sel_name
-    sel_name=$(echo "$services" | tr ' ' '\n' | sed -n "${REPLY}p")
+    sel_name=$(echo "$services" | cut -d' ' -f"$REPLY")
     [ -z "$sel_name" ] && { warn "Неверный выбор"; pause; return; }
 
     prompt "Удалить сервис '$sel_name'? (д/н) [н]: "
@@ -595,7 +595,7 @@ select_service() {
         printf "  ${BOLD}%d)${NC}  %b  %-14s  %s:%s" "$idx" "$st" "$SVC_NAME" "$SVC_TARGET_HOST" "$SVC_TARGET_PORT"
         [ -n "$SVC_DOMAIN" ] && printf "  ${DIM}(%s)${NC}" "$SVC_DOMAIN"
         printf "\n"
-        services="$services $SVC_NAME"
+        [ -z "$services" ] && services="$SVC_NAME" || services="$services $SVC_NAME"
     done
 
     if [ "$idx" -eq 0 ]; then
@@ -614,7 +614,8 @@ select_service() {
         return 0
     fi
 
-    SELECTED_SERVICE=$(echo "$services" | tr ' ' '\n' | sed -n "${REPLY}p")
+    # Извлечение имени сервиса по индексу (1-based)
+    SELECTED_SERVICE=$(echo "$services" | cut -d' ' -f"$REPLY")
     [ -z "$SELECTED_SERVICE" ] && { warn "Неверный выбор"; return 1; }
     return 0
 }
