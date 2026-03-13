@@ -173,7 +173,8 @@ main_menu() {
         printf "  ${BOLD}5)${NC}  ⏹️   Остановить туннель\n"
         printf "  ${BOLD}6)${NC}  🔄  Перезапустить туннель\n"
         draw_separator
-        printf "  ${BOLD}7)${NC}  ⚙️   Настройки VPS\n"
+        printf "  ${BOLD}7)${NC}  🔒  Получить/Обновить SSL (Certbot)\n"
+        printf "  ${BOLD}8)${NC}  ⚙️   Настройки VPS\n"
         printf "  ${BOLD}0)${NC}  🚪  Выход\n"
 
         prompt "Выберите действие: "
@@ -185,7 +186,8 @@ main_menu() {
             4) do_start_interactive ;;
             5) do_stop_interactive ;;
             6) do_restart_interactive ;;
-            7) do_setup ;;
+            7) do_ssl_interactive ;;
+            8) do_setup ;;
             0|q) clear_screen; exit 0 ;;
             *) ;;
         esac
@@ -429,6 +431,53 @@ EOF
 
     # Автозапуск туннеля
     do_start_service "$name"
+    pause
+}
+
+# ══════════════════════════════════════════════════════════════════════
+# ПОЛУЧИТЬ SSL (Certbot)
+# ══════════════════════════════════════════════════════════════════════
+do_ssl_interactive() {
+    clear_screen
+    draw_box "Получить SSL сертификат (Certbot)"
+    printf "\n"
+
+    select_service "Выпуститиь SSL для" "all" || { pause; return; }
+    local name="$SELECTED_SERVICE"
+    [ "$name" = "__ALL__" ] && { warn "Выберите конкретный сервис"; pause; return; }
+
+    load_service "$name" || { pause; return; }
+
+    if [ -z "$SVC_DOMAIN" ]; then
+        err "Для получения SSL сервису должен быть назначен домен"
+        pause
+        return
+    fi
+
+    if [ -z "$CERTBOT_EMAIL" ]; then
+        prompt "Введите Email для регистрации в Certbot: "
+        CERTBOT_EMAIL="$REPLY"
+        sed -i "/CERTBOT_EMAIL=/d" "$CONF_FILE"
+        echo "CERTBOT_EMAIL=\"$CERTBOT_EMAIL\"" >> "$CONF_FILE"
+    fi
+
+    msg "Проверяю наличие Certbot на VPS..."
+    ssh_cmd "command -v certbot >/dev/null 2>&1 || (apt-get update && apt-get install -y certbot python3-certbot-nginx || yum install -y certbot python3-certbot-nginx)" || {
+        err "Не удалось установить Certbot на VPS"
+        pause
+        return
+    }
+
+    msg "Запрашиваю сертификат для $SVC_DOMAIN..."
+    if ssh_cmd "certbot --nginx -d $SVC_DOMAIN --non-interactive --agree-tos -m $CERTBOT_EMAIL"; then
+        msg "SSL сертификат успешно получен!"
+        # Обновляем конфиг сервиса
+        sed -i "s/SVC_SSL=.*/SVC_SSL=\"yes\"/" "$SERVICES_DIR/$name.conf"
+        sed -i "s/SVC_EXT_PORT=.*/SVC_EXT_PORT=\"443\"/" "$SERVICES_DIR/$name.conf"
+    else
+        err "Certbot не смог выпустить сертификат"
+        warn "Убедитесь, что домен $SVC_DOMAIN указывает на этот VPS и порт 80 открыт"
+    fi
     pause
 }
 
@@ -832,10 +881,9 @@ do_setup() {
             sed -i \"/http {/a\\\\    include /etc/nginx/sites-enabled/*.conf;\" /etc/nginx/nginx.conf 2>/dev/null
         fi
 
-        if ! command -v certbot >/dev/null 2>&1; then
-            echo \"Устанавливаю Certbot...\"
-            apt-get install -y -qq certbot python3-certbot-nginx >/dev/null 2>&1 || \
-            yum install -y certbot python3-certbot-nginx >/dev/null 2>&1
+        if ! ssh_cmd "command -v certbot" >/dev/null 2>&1; then
+            msg "Устанавливаю Certbot на VPS (может занять пару минут)..."
+            ssh_cmd "apt-get update -qq && apt-get install -y -qq certbot python3-certbot-nginx || yum install -y certbot python3-certbot-nginx" >/dev/null 2>&1
         fi
 
         systemctl enable nginx 2>/dev/null
