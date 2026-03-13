@@ -3,7 +3,8 @@
 # Публикация локальных сервисов через SSH-туннели + nginx на VPS
 # http://5.104.75.50:3000/Petro1990/rProxy
 
-VERSION="1.5.1"
+VERSION="1.5.2"
+export PATH="/opt/bin:/opt/sbin:$PATH"
 CONF_DIR="/opt/etc/rproxy"
 CONF_FILE="$CONF_DIR/rproxy.conf"
 SERVICES_DIR="$CONF_DIR/services"
@@ -142,7 +143,10 @@ ensure_local_deps() {
     
     # Проверка sshpass
     if ! command -v sshpass >/dev/null 2>&1; then
-        missing="$missing sshpass"
+        # Дополнительная проверка через opkg на случай если бинарник не в PATH
+        if ! opkg list-installed sshpass | grep -q sshpass; then
+            missing="$missing sshpass"
+        fi
     fi
     
     # Проверка curl (нужен для обновлений)
@@ -158,6 +162,8 @@ ensure_local_deps() {
             msg "Установка $pkg..."
             opkg install "$pkg" >/dev/null 2>&1
         done
+        # Даем время системе обновить кеш путей
+        hash -r 2>/dev/null
         msg "Все зависимости установлены."
     fi
 }
