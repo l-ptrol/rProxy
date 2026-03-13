@@ -667,21 +667,24 @@ do_setup() {
     local vps_pass=""
 
     if [ "$auth_choice" = "2" ]; then
-        vps_auth="password"
-        
-        if ! command -v sshpass >/dev/null 2>&1; then
-            printf "\n  ${RED}✖ Ошибка: Утилита sshpass не найдена в системе.${NC}\n"
-            printf "    Для вашего роутера этот пакет недоступен в репозитории.\n"
-            printf "    Пожалуйста, используйте авторизацию по SSH-ключу.\n"
+        if command -v sshpass >/dev/null 2>&1; then
+            vps_auth="password"
+            printf "  SSH пароль: "
+            stty -echo 2>/dev/null
+            read -r vps_pass
+            stty echo 2>/dev/null
+            printf "\n"
+        else
+            printf "\n  ${YELLOW}⚠ Утилита sshpass не найдена.${NC}\n"
+            printf "    Для фоновой работы сервисов (туннелей) нужен либо пакет sshpass,\n"
+            printf "    либо использование SSH-ключа (рекомендуется).\n\n"
+            printf "    ${CYAN}Решение (Обход):${NC}\n"
+            printf "    Используйте вариант ${BOLD}1 (SSH-ключ)${NC}. Скрипт сам создаст ключ,\n"
+            printf "    попросит ваш пароль один раз, чтобы скопировать его на VPS,\n"
+            printf "    и дальше всё будет работать автоматически и БЕЗОПАСНО.\n"
             pause
             return
         fi
-
-        printf "  SSH пароль: "
-        stty -echo 2>/dev/null
-        read -r vps_pass
-        stty echo 2>/dev/null
-        printf "\n"
     else
         if [ ! -f "$SSH_KEY" ]; then
             msg "Генерирую SSH-ключ..."
