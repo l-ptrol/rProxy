@@ -1,7 +1,7 @@
 #!/bin/sh
 # rProxy — Менеджер обратного прокси для роутеров Keenetic
 # Публикация локальных сервисов через SSH-туннели + nginx на VPS
-# http://5.104.75.50:3000/Petro1990/rProxy
+# https://github.com/l-ptrol/rProxy
 
 VERSION="1.6.5"
 export PATH="/opt/bin:/opt/sbin:$PATH"
@@ -681,7 +681,7 @@ do_self_update() {
     printf "\n"
     msg "Проверяю наличие обновлений..."
     
-    local url="http://5.104.75.50:3000/Petro1990/rProxy/raw/branch/main/rproxy"
+    local url="https://raw.githubusercontent.com/l-ptrol/rProxy/main/rproxy"
     local tmp_file="/tmp/rproxy_update"
     
     if curl -sSL "$url" -o "$tmp_file"; then

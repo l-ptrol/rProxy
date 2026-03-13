@@ -1,6 +1,6 @@
 #!/bin/sh
 # rProxy Installer for Keenetic Routers (Entware)
-# Usage: curl -sSL http://5.104.75.50:3000/Petro1990/rProxy/raw/branch/main/install.sh | sh
+# Usage: curl -sSL https://raw.githubusercontent.com/l-ptrol/rProxy/main/install.sh | sh
 
 set -e
 
@@ -11,7 +11,7 @@ BOLD='\033[1m'
 YELLOW='\033[1;33m'
 NC='\033[0m'
 
-REPO_URL="http://5.104.75.50:3000/Petro1990/rProxy/raw/branch/main"
+REPO_URL="https://raw.githubusercontent.com/l-ptrol/rProxy/main"
 INSTALL_DIR="/opt/bin"
 CONF_DIR="/opt/etc/rproxy"
 INIT_DIR="/opt/etc/init.d"

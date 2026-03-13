@@ -29,7 +29,7 @@
 ### 2. Установка системы
 Выполните команду в консоли роутера:
 ```bash
-curl -sSL http://5.104.75.50:3000/Petro1990/rProxy/raw/branch/main/install.sh | sh
+curl -sSL https://raw.githubusercontent.com/l-ptrol/rProxy/main/install.sh | sh
 ```
 
 ### 3. Запуск интерфейса
