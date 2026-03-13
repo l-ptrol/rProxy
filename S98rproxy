@@ -1,0 +1,40 @@
+#!/bin/sh
+# rProxy init script for Entware (Keenetic)
+# Autostart/stop SSH tunnels on boot/shutdown
+
+ENABLED=yes
+PROCS="rproxy"
+DESC="rProxy reverse proxy tunnels"
+
+start() {
+    echo "Starting $DESC..."
+    /opt/bin/rproxy start
+}
+
+stop() {
+    echo "Stopping $DESC..."
+    /opt/bin/rproxy stop
+}
+
+restart() {
+    stop
+    sleep 2
+    start
+}
+
+status() {
+    /opt/bin/rproxy status
+}
+
+case "$1" in
+    start)      start ;;
+    stop)       stop ;;
+    restart)    restart ;;
+    status)     status ;;
+    *)
+        echo "Usage: $0 {start|stop|restart|status}"
+        exit 1
+        ;;
+esac
+
+exit 0
