@@ -3,7 +3,7 @@
 # Публикация локальных сервисов через SSH-туннели + nginx на VPS
 # http://5.104.75.50:3000/Petro1990/rProxy
 
-VERSION="1.6.3"
+VERSION="1.6.4"
 export PATH="/opt/bin:/opt/sbin:$PATH"
 CONF_DIR="/opt/etc/rproxy"
 CONF_FILE="$CONF_DIR/rproxy.conf"
@@ -849,9 +849,9 @@ do_remove_interactive() {
     load_service "$name" || { pause; return; }
     is_running "$name" && do_stop_service "$name"
 
-    msg "Удаляю конфиг nginx на VPS..."
-    ssh_cmd "rm -f $REMOTE_NGINX_DIR/rproxy_$name.conf && nginx -t && systemctl reload nginx" >/dev/null 2>&1 || {
-        warn "Не удалось удалить конфиг nginx на VPS (возможно он уже удален)"
+    msg "Удаляю конфиги Nginx и пароли на VPS..."
+    ssh_cmd "rm -f $REMOTE_NGINX_DIR/rproxy_$name.conf /etc/nginx/rproxy_$name.htpasswd && nginx -t && systemctl reload nginx" >/dev/null 2>&1 || {
+        warn "Не удалось полностью очистить VPS (возможно файлы уже удалены)"
     }
 
     rm -f "$SERVICES_DIR/$name.conf"
@@ -1252,7 +1252,8 @@ do_setup() {
         draw_separator
         printf "  ${BOLD}901)${NC} ➕  Добавить новый VPS\n"
         [ "$idx" -gt 0 ] && printf "  ${BOLD}902)${NC} ❌  Удалить VPS\n"
-        printf "  ${BOLD}903)${NC} 🔑  Пароль публикации по умолчанию\n"
+        [ "$idx" -gt 0 ] && printf "  ${BOLD}903)${NC} 🧹  Очистить VPS от мусора (фантомные конфиги)\n"
+        printf "  ${BOLD}904)${NC} 🔑  Пароль публикации по умолчанию\n"
         printf "  ${BOLD}0)${NC}   Назад\n"
         
         prompt "Выберите действие: "
@@ -1260,7 +1261,8 @@ do_setup() {
             0) return ;;
             901) do_add_vps ;;
             902) [ "$idx" -gt 0 ] && do_delete_vps_interactive "$vps_list" ;;
-            903) do_change_auth_defaults ;;
+            903) [ "$idx" -gt 0 ] && do_vps_cleanup_menu "$vps_list" ;;
+            904) do_change_auth_defaults ;;
             [1-9]*)
                 local sel_vps=$(echo "$vps_list" | cut -d' ' -f"$REPLY")
                 [ -n "$sel_vps" ] && do_add_vps "$sel_vps"
@@ -1278,6 +1280,80 @@ do_delete_vps_interactive() {
     prompt "Удалить профиль VPS '$sel_vps'? (д/н) [н]: "
     case "$REPLY" in
         д|Д|y|Y) rm -f "$VPS_DIR/$sel_vps.conf"; msg "Удалено" ;;
+        *) msg "Отменено" ;;
+    esac
+    pause
+}
+
+do_vps_cleanup_menu() {
+    local list="$1"
+    prompt "Введите номер VPS для очистки: "
+    local sel_vps=$(echo "$list" | cut -d' ' -f"$REPLY")
+    [ -z "$sel_vps" ] && { warn "Неверный выбор"; pause; return; }
+    
+    do_vps_cleanup_interactive "$sel_vps"
+}
+
+do_vps_cleanup_interactive() {
+    local vps_id="$1"
+    load_vps "$vps_id" || return
+
+    clear_screen
+    draw_box "Очистка VPS: $vps_id ($VPS_HOST)"
+    printf "\n"
+    
+    msg "Сканирую VPS на наличие конфигураций rProxy..."
+    local remote_files
+    remote_files=$(ssh_cmd "ls $REMOTE_NGINX_DIR/rproxy_*.conf /etc/nginx/rproxy_*.htpasswd 2>/dev/null | xargs -n1 basename 2>/dev/null")
+
+    if [ -z "$remote_files" ]; then
+        msg "На сервере не обнаружено файлов rProxy."
+        pause
+        return
+    fi
+
+    local to_delete=""
+    local local_found=""
+    
+    header "Обнаруженные файлы на VPS:"
+    echo "$remote_files" | while read -r line; do
+        # Извлекаем имя сервиса из rproxy_NAME.conf или rproxy_NAME.htpasswd
+        local s_name=$(echo "$line" | sed -E 's/^rproxy_(.+)\.(conf|htpasswd)$/\1/')
+        
+        if [ -f "$SERVICES_DIR/$s_name.conf" ]; then
+            printf "  ${GREEN}●${NC} %-30s (Активен локально)\n" "$line"
+        else
+            printf "  ${RED}○${NC} %-30s (ФАНТОМНЫЙ - нет на роутере)\n" "$line"
+            local_found="1"
+        fi
+    done
+
+    draw_separator
+    printf "  ${BOLD}1)${NC} 🧹  Умная очистка (удалить только фантомные файлы)\n"
+    printf "  ${BOLD}2)${NC} 🔥  Полная очистка (удалить ВСЕ конфиги rProxy на этом VPS)\n"
+    printf "  ${BOLD}0)${NC}     Отмена\n"
+    
+    prompt "Выберите действие: "
+    case "$REPLY" in
+        1)
+            msg "Выполняю умную очистку..."
+            echo "$remote_files" | while read -r line; do
+                local s_name=$(echo "$line" | sed -E 's/^rproxy_(.+)\.(conf|htpasswd)$/\1/')
+                if [ ! -f "$SERVICES_DIR/$s_name.conf" ]; then
+                    msg "Удаляю $line..."
+                    ssh_cmd "rm -f $REMOTE_NGINX_DIR/$line /etc/nginx/$line" >/dev/null 2>&1
+                fi
+            done
+            ssh_cmd "nginx -t && systemctl reload nginx" >/dev/null 2>&1
+            msg "Готово!"
+            ;;
+        2)
+            prompt "Это удалит ВСЕ публикации rProxy на этом VPS. Уверены? (y/n): "
+            [ "$REPLY" != "y" ] && { msg "Отменено"; pause; return; }
+            msg "Полная очистка..."
+            ssh_cmd "rm -f $REMOTE_NGINX_DIR/rproxy_*.conf /etc/nginx/rproxy_*.htpasswd && nginx -t && systemctl reload nginx" >/dev/null 2>&1
+            msg "Все конфигурации rProxy на VPS '$vps_id' удалены."
+            ;;
         *) msg "Отменено" ;;
     esac
     pause
