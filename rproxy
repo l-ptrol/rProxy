@@ -96,7 +96,7 @@ next_free_port() {
     local port=$BASE_TUNNEL_PORT
     while true; do
         local used=0
-        for f in "$SERVICES_DIR"/*.conf 2>/dev/null; do
+        for f in "$SERVICES_DIR"/*.conf; do
             [ -f "$f" ] || continue
             grep -q "TUNNEL_PORT=$port" "$f" && used=1 && break
         done
@@ -145,7 +145,7 @@ main_menu() {
 
         # Подсчёт сервисов и статусов
         local total=0 online=0
-        for f in "$SERVICES_DIR"/*.conf 2>/dev/null; do
+        for f in "$SERVICES_DIR"/*.conf; do
             [ -f "$f" ] || continue
             total=$((total + 1))
             . "$f"
