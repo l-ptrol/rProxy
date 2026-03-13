@@ -3,10 +3,11 @@
 # Публикация локальных сервисов через SSH-туннели + nginx на VPS
 # http://5.104.75.50:3000/Petro1990/rProxy
 
-VERSION="1.0.4"
+VERSION="1.0.5"
 CONF_DIR="/opt/etc/rproxy"
 CONF_FILE="$CONF_DIR/rproxy.conf"
 SERVICES_DIR="$CONF_DIR/services"
+VPS_DIR="$CONF_DIR/vps"
 PID_DIR="/opt/var/run/rproxy"
 SSH_KEY="$CONF_DIR/id_ed25519"
 REMOTE_NGINX_DIR="/etc/nginx/sites-enabled"
@@ -56,6 +57,8 @@ check_conf() {
         return 1
     fi
     . "$CONF_FILE"
+    # Для работы нужно, чтобы был хотя бы один VPS профиль
+    [ "$(ls -A "$VPS_DIR" 2>/dev/null)" ] || return 1
     return 0
 }
 
@@ -66,6 +69,47 @@ load_service() {
         return 1
     fi
     . "$svc_file"
+    # При загрузке сервиса также загружаем его VPS
+    if [ -n "$SVC_VPS" ]; then
+        load_vps "$SVC_VPS" || return 1
+    else
+        # Обратная совместимость: если VPS не указан, пробуем default
+        load_vps "default" || return 1
+    fi
+}
+
+load_vps() {
+    local vps_id="$1"
+    local vps_file="$VPS_DIR/$vps_id.conf"
+    if [ ! -f "$vps_file" ]; then
+        return 1
+    fi
+    # Сброс старых переменных перед загрузкой
+    VPS_HOST="" VPS_PORT="" VPS_USER="" VPS_AUTH="" VPS_PASS=""
+    . "$vps_file"
+    CUR_VPS_ID="$vps_id"
+    return 0
+}
+
+migrate_config() {
+    mkdir -p "$VPS_DIR" "$SERVICES_DIR" "$PID_DIR"
+    if [ -f "$CONF_FILE" ] && [ ! -f "$VPS_DIR/default.conf" ]; then
+        msg "Миграция конфигурации в новый формат..."
+        # Копируем параметры в профиль default
+        cat > "$VPS_DIR/default.conf" <<EOF
+VPS_HOST="$VPS_HOST"
+VPS_PORT="$VPS_PORT"
+VPS_USER="$VPS_USER"
+VPS_AUTH="$VPS_AUTH"
+VPS_PASS="$VPS_PASS"
+EOF
+        # В основном конфиге оставляем только глобальные настройки
+        cat > "$CONF_FILE.tmp" <<EOF
+CERTBOT_EMAIL="$CERTBOT_EMAIL"
+EOF
+        mv "$CONF_FILE.tmp" "$CONF_FILE"
+        chmod 600 "$VPS_DIR/default.conf" "$CONF_FILE"
+    fi
 }
 
 ssh_cmd() {
@@ -150,16 +194,19 @@ main_menu() {
             continue
         fi
 
-        # Подсчёт сервисов и статусов
+        # Подсчёт сервисов и статусов по всем VPS
         local total=0 online=0
         for f in "$SERVICES_DIR"/*.conf; do
             [ -f "$f" ] || continue
             total=$((total + 1))
-            . "$f"
-            is_running "$SVC_NAME" && online=$((online + 1))
+            (
+                . "$f"
+                is_running "$SVC_NAME" && exit 0
+                exit 1
+            ) && online=$((online + 1))
         done
 
-        printf "  ${DIM}VPS:${NC} ${BOLD}$VPS_HOST${NC}  "
+        printf "  ${DIM}Серверов VPS:${NC} ${BOLD}$(ls -A "$VPS_DIR" | wc -l)${NC}  "
         printf "${DIM}Сервисов:${NC} ${BOLD}$total${NC}  "
         printf "${DIM}Онлайн:${NC} ${GREEN}${BOLD}$online${NC}\n"
         draw_separator
@@ -216,21 +263,23 @@ show_status() {
         [ -f "$f" ] || continue
         has_services=1
         idx=$((idx + 1))
-        . "$f"
+        (
+            load_service "$(basename "$f" .conf)" >/dev/null 2>&1
+            
+            local status_text
+            if is_running "$SVC_NAME"; then
+                status_text="${GREEN}● онлайн${NC}"
+            else
+                status_text="${RED}○ офлайн${NC}"
+            fi
 
-        local status_text
-        if is_running "$SVC_NAME"; then
-            status_text="${GREEN}● онлайн${NC}"
-        else
-            status_text="${RED}○ офлайн${NC}"
-        fi
+            local domain_text="${SVC_DOMAIN:-—}"
+            local auto_text=""
+            [ "$SVC_ENABLED" = "yes" ] && auto_text=" ${DIM}[авто]${NC}"
 
-        local domain_text="${SVC_DOMAIN:-—}"
-        local auto_text=""
-        [ "$SVC_ENABLED" = "yes" ] && auto_text=" ${DIM}[авто]${NC}"
-
-        printf "  %-4s %-14s %-22s %-7s ${status_text}  %-18s${auto_text}\n" \
-            "$idx" "$SVC_NAME" "$SVC_TARGET_HOST:$SVC_TARGET_PORT" "$SVC_EXT_PORT" "$domain_text"
+            printf "  %-4s %-14s %-22s %-7s ${status_text}  %-18s${auto_text}\n" \
+                "$idx" "$SVC_NAME" "$SVC_TARGET_HOST:$SVC_TARGET_PORT" "$SVC_EXT_PORT" "$domain_text"
+        )
     done
 
     if [ "$has_services" -eq 0 ]; then
@@ -240,6 +289,65 @@ show_status() {
 
     printf "\n"
     pause
+}
+
+# ══════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════
+# ПОМОЩНИКИ VPS
+# ══════════════════════════════════════════════════════════════════════
+
+find_vps_by_domain() {
+    local dom="$1"
+    # Пытаемся получить IP через ping (BusyBox стиль)
+    local ip=$(ping -c 1 "$dom" 2>/dev/null | grep -o "[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}" | head -n 1)
+    # Если не вышло, пробуем nslookup
+    [ -z "$ip" ] && ip=$(nslookup "$dom" 2>/dev/null | grep "Address" | tail -n 1 | awk '{print $2}')
+    
+    [ -z "$ip" ] && return 1
+
+    for f in "$VPS_DIR"/*.conf; do
+        [ -f "$f" ] || continue
+        (
+            VPS_HOST=""
+            . "$f"
+            if [ "$VPS_HOST" = "$ip" ]; then
+                basename "$f" .conf
+                exit 0
+            fi
+            exit 1
+        ) && { basename "$f" .conf; return 0; }
+    done
+    return 1
+}
+
+select_vps_interactive() {
+    clear_screen
+    draw_box "Выберите VPS для сервиса"
+    printf "\n"
+    local vps_list=""
+    local idx=0
+    for f in "$VPS_DIR"/*.conf; do
+        [ -f "$f" ] || continue
+        idx=$((idx + 1))
+        (
+            . "$f"
+            printf "  ${BOLD}%d)${NC}  %s  (${DIM}%s${NC})\n" "$idx" "$(basename "$f" .conf)" "$VPS_HOST"
+        )
+        vps_list="$vps_list $(basename "$f" .conf)"
+    done
+    
+    printf "  ${BOLD}n)${NC}  ➕  Добавить новый VPS\n"
+    prompt "Выберите номер или 'n': "
+    
+    if [ "$REPLY" = "n" ] || [ "$REPLY" = "N" ]; then
+        do_add_vps
+        # Возвращаем последний созданный (упрощение)
+        ls -t "$VPS_DIR"/*.conf | head -n 1 | xargs basename | sed 's/\.conf//'
+        return 0
+    fi
+    
+    local sel=$(echo "$vps_list" | cut -d' ' -f"$REPLY")
+    echo "$sel"
 }
 
 # ══════════════════════════════════════════════════════════════════════
@@ -256,11 +364,10 @@ do_add_interactive() {
 
     if [ -f "$SERVICES_DIR/$name.conf" ]; then
         err "Сервис '$name' уже существует"
-        pause
-        return
+        pause; return
     fi
 
-    prompt "Адрес локального сервиса (например, 192.168.1.100:8080): "
+    prompt "Адрес локального сервиса (например, 127.0.0.1:8080): "
     local target="$REPLY"
     [ -z "$target" ] && { warn "Адрес не может быть пустым"; pause; return; }
 
@@ -270,153 +377,92 @@ do_add_interactive() {
     prompt "Выберите [2]: "
     local mode="${REPLY:-2}"
 
-    local domain=""
-    local ext_port=""
-    local use_ssl="no"
+    local domain="" ext_port="" use_ssl="no" vps_id=""
 
     if [ "$mode" = "1" ]; then
         prompt "Доменное имя (например, mysite.example.com): "
         domain="$REPLY"
         [ -z "$domain" ] && { warn "Домен не указан"; pause; return; }
+        use_ssl="yes"; ext_port=443
         
-        # SSL теперь всегда включен для доменов по запросу пользователя
-        use_ssl="yes" 
-        ext_port=443
         if [ -z "$CERTBOT_EMAIL" ]; then
-            prompt "Введите Email для регистрации сертификатов (Certbot): "
+            prompt "Введите Email для Certbot: "
             CERTBOT_EMAIL="$REPLY"
-            # Сохраняем email в конфиг
             sed -i "/CERTBOT_EMAIL=/d" "$CONF_FILE"
             echo "CERTBOT_EMAIL=\"$CERTBOT_EMAIL\"" >> "$CONF_FILE"
         fi
+
+        # Автоопределение VPS по домену
+        msg "Проверяю куда направлен домен $domain..."
+        vps_id=$(find_vps_by_domain "$domain")
+        if [ -n "$vps_id" ]; then
+            msg "Домен $domain указывает на ваш VPS '$vps_id'. Выбираю его."
+        else
+            warn "Не удалось автоматически определить VPS для $domain"
+        fi
     else
-        local suggested
-        suggested=$(next_free_port)
-        prompt "Внешний порт [$suggested]: "
-        ext_port="${REPLY:-$suggested}"
-        use_ssl="no"
+        ext_port=$(next_free_port)
+        prompt "Внешний порт [$ext_port]: "
+        ext_port="${REPLY:-$ext_port}"
     fi
+
+    # Если VPS не определен автоматически — выбираем вручную
+    if [ -z "$vps_id" ]; then
+        vps_id=$(select_vps_interactive)
+        [ -z "$vps_id" ] && { warn "VPS не выбран"; pause; return; }
+    fi
+
+    # Загружаем выбранный VPS для деплоя
+    load_vps "$vps_id" || { err "Не удалось загрузить VPS '$vps_id'"; pause; return; }
 
     # Разбор адреса
-    local target_host="${target%:*}"
-    local target_port="${target#*:}"
-    if [ "$target_host" = "$target_port" ]; then
-        target_port="$target_host"
-        target_host="127.0.0.1"
-    fi
+    local t_host="${target%:*}"
+    local t_port="${target#*:}"
+    [ "$t_host" = "$t_port" ] && { t_port="$t_host"; t_host="127.0.0.1"; }
 
-    local tunnel_port
-    tunnel_port=$(next_free_port)
+    local tunnel_port=$(next_free_port)
 
     printf "\n"
     draw_separator
     printf "  ${BOLD}Сервис:${NC}        $name\n"
-    printf "  ${BOLD}Цель:${NC}          $target_host:$target_port\n"
+    printf "  ${BOLD}VPS:${NC}           $vps_id ($VPS_HOST)\n"
+    printf "  ${BOLD}Цель:${NC}          $t_host:$t_port\n"
     printf "  ${BOLD}Туннель:${NC}       порт $tunnel_port\n"
     [ -n "$domain" ] && printf "  ${BOLD}Домен:${NC}         $domain\n"
     printf "  ${BOLD}Внешний порт:${NC}  $ext_port\n"
-    [ "$use_ssl" = "yes" ] && printf "  ${BOLD}SSL:${NC}           Включен (Certbot)\n"
     draw_separator
 
     prompt "Всё верно? Добавить сервис? (д/н) [д]: "
-    local confirm="${REPLY:-д}"
-    case "$confirm" in
-        д|Д|y|Y|да|yes) ;;
-        *) msg "Отменено"; pause; return ;;
-    esac
+    [ "${REPLY:-д}" != "д" ] && [ "${REPLY:-д}" != "y" ] && { msg "Отменено"; pause; return; }
 
-    printf "\n"
     msg "Добавляю сервис '$name'..."
 
-    # Генерация конфига nginx
-    local nginx_conf=""
+    # Конфиг nginx (упрощенная генерация)
+    local nginx_conf
     if [ -n "$domain" ]; then
-        # Для домена всегда сначала создаем конфиг на 80 порт
-        # Если нужен SSL, Certbot сам его проапгрейдит
-        nginx_conf="# rProxy: $name
-server {
-    listen 80;
-    server_name $domain;
-
-    location / {
-        proxy_pass http://127.0.0.1:$tunnel_port;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade \$http_upgrade;
-        proxy_set_header Connection \"upgrade\";
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
-        proxy_connect_timeout 60s;
-        proxy_send_timeout 60s;
-        proxy_read_timeout 60s;
-    }
-}
-"
+        nginx_conf="server { listen 80; server_name $domain; location / { proxy_pass http://127.0.0.1:$tunnel_port; proxy_set_header Host \$host; proxy_set_header X-Real-IP \$remote_addr; } }"
     else
-        nginx_conf="# rProxy: $name
-server {
-    listen $ext_port;
-
-    location / {
-        proxy_pass http://127.0.0.1:$tunnel_port;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade \$http_upgrade;
-        proxy_set_header Connection \"upgrade\";
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
-        proxy_connect_timeout 60s;
-        proxy_send_timeout 60s;
-        proxy_read_timeout 60s;
-    }
-}
-"
+        nginx_conf="server { listen $ext_port; location / { proxy_pass http://127.0.0.1:$tunnel_port; proxy_set_header Host \$host; } }"
     fi
 
-    # Деплой nginx конфига на VPS
-    msg "Загружаю конфигурацию nginx..."
-    local tmp_file="/tmp/rproxy_nginx_$name.conf"
-    printf '%s' "$nginx_conf" > "$tmp_file"
-    scp_cmd "$tmp_file" "$VPS_USER@$VPS_HOST:$REMOTE_NGINX_DIR/rproxy_$name.conf" || {
-        err "Не удалось загрузить конфиг nginx на VPS"
-        rm -f "$tmp_file"
-        pause
-        return
-    }
-    rm -f "$tmp_file"
+    # Деплой
+    local tmp="/tmp/rproxy_$name.conf"
+    echo "$nginx_conf" > "$tmp"
+    scp_cmd "$tmp" "$VPS_USER@$VPS_HOST:$REMOTE_NGINX_DIR/rproxy_$name.conf" || { err "Ошибка деплоя nginx"; pause; return; }
+    ssh_cmd "nginx -t && systemctl reload nginx" >/dev/null 2>&1
 
-    # Проверка и перезагрузка nginx
-    msg "Проверяю конфигурацию nginx на VPS..."
-    local nginx_test
-    nginx_test=$(ssh_cmd "nginx -t 2>&1")
-    if [ $? -ne 0 ]; then
-        err "Ошибка в конфигурации nginx на VPS:"
-        printf "  ${DIM}%s${NC}\n" "$nginx_test"
-        ssh_cmd "rm -f $REMOTE_NGINX_DIR/rproxy_$name.conf"
-        pause
-        return
-    fi
-    ssh_cmd "systemctl reload nginx" >/dev/null 2>&1
-
-    # Получение SSL сертификата если нужно
+    # SSL если нужно
     if [ "$use_ssl" = "yes" ]; then
-        msg "Получаю SSL сертификат через Certbot (может занять время)..."
-        ssh_cmd "certbot --nginx -d $domain --non-interactive --agree-tos -m $CERTBOT_EMAIL" || {
-            warn "Certbot не смог получить сертификат. Проверьте DNS и доступность порта 80."
-            use_ssl="no"
-            ext_port=80
-        }
+        msg "Получаю SSL через Certbot (может занять время)..."
+        ssh_cmd "certbot --nginx -d $domain --non-interactive --agree-tos -m $CERTBOT_EMAIL" || warn "Certbot вернул ошибку"
     fi
-
 
     # Сохранение конфига сервиса
     cat > "$SERVICES_DIR/$name.conf" <<EOF
-# rProxy сервис: $name
 SVC_NAME="$name"
-SVC_TARGET_HOST="$target_host"
-SVC_TARGET_PORT="$target_port"
+SVC_VPS="$vps_id"
+SVC_TARGET_HOST="$t_host"
+SVC_TARGET_PORT="$t_port"
 SVC_TUNNEL_PORT="$tunnel_port"
 SVC_EXT_PORT="$ext_port"
 SVC_DOMAIN="$domain"
@@ -424,9 +470,7 @@ SVC_SSL="$use_ssl"
 SVC_ENABLED="yes"
 EOF
 
-    msg "Сервис '$name' добавлен!"
-
-    # Автозапуск туннеля
+    msg "Сервис '$name' добавлен на VPS '$vps_id'!"
     do_start_service "$name"
     pause
 }
@@ -514,34 +558,46 @@ do_health_check() {
     clear_screen
     draw_box "Состояние VPS и SSL"
     printf "\n"
-    
-    msg "Проверяю Nginx..."
-    if ssh_cmd "systemctl is-active nginx >/dev/null 2>&1"; then
-        printf "  Nginx:        ${GREEN}${BOLD}Запущен${NC}\n"
-    else
-        printf "  Nginx:        ${RED}${BOLD}Остановлен${NC}\n"
-    fi
-    
-    msg "Проверяю автопродление SSL (Certbot)..."
-    local timer=$(ssh_cmd "systemctl is-active certbot.timer 2>/dev/null | tr -d '\r'")
-    if [ "$timer" = "active" ]; then
-        printf "  SSL Timer:    ${GREEN}${BOLD}Активен (Systemd)${NC}\n"
-        local next_run=$(ssh_cmd "systemctl list-timers certbot.timer --no-legend 2>/dev/null | awk '{print \$1, \$2}'" | head -n 1)
-        [ -n "$next_run" ] && printf "  Следующее:    $next_run\n"
-    else
-        # Проверка cron
-        if ssh_cmd "crontab -l 2>/dev/null | grep -q certbot"; then
-            printf "  SSL Renewal:  ${GREEN}${BOLD}Настроено (Cron)${NC}\n"
+
+    for f in "$VPS_DIR"/*.conf; do
+        [ -f "$f" ] || continue
+        local vps_id=$(basename "$f" .conf)
+        load_vps "$vps_id"
+        
+        header "Сервер: $vps_id ($VPS_HOST)"
+        
+        msg "Проверяю Nginx..."
+        if ssh_cmd "systemctl is-active nginx >/dev/null 2>&1"; then
+            printf "  Nginx:        ${GREEN}${BOLD}Запущен${NC}\n"
         else
-            printf "  SSL Renewal:  ${RED}${BOLD}Не обнаружено${NC}\n"
+            printf "  Nginx:        ${RED}${BOLD}Остановлен${NC}\n"
         fi
-    fi
-    
-    msg "Действующие сертификаты:"
-    ssh_cmd "certbot certificates 2>/dev/null | grep -E 'Expiry Date:|Domains:'" | while read -r line; do
-        printf "  %s\n" "$line"
+        
+        msg "Проверяю автопродление SSL (Certbot)..."
+        local timer=$(ssh_cmd "systemctl is-active certbot.timer 2>/dev/null | tr -d '\r'")
+        if [ "$timer" = "active" ]; then
+            printf "  SSL Timer:    ${GREEN}${BOLD}Активен (Systemd)${NC}\n"
+            local next_run=$(ssh_cmd "systemctl list-timers certbot.timer --no-legend 2>/dev/null | awk '{print \$1, \$2}'" | head -n 1)
+            [ -n "$next_run" ] && printf "  Следующее:    $next_run\n"
+        else
+            if ssh_cmd "crontab -l 2>/dev/null | grep -q certbot"; then
+                printf "  SSL Renewal:  ${GREEN}${BOLD}Настроено (Cron)${NC}\n"
+            else
+                printf "  SSL Renewal:  ${RED}${BOLD}Не обнаружено${NC}\n"
+            fi
+        fi
+        
+        msg "Действующие сертификаты:"
+        local certs=$(ssh_cmd "certbot certificates 2>/dev/null | grep -E 'Expiry Date:|Domains:'")
+        if [ -n "$certs" ]; then
+            echo "$certs" | while read -r line; do
+                printf "  %s\n" "$line"
+            done
+        else
+            printf "  ${DIM}Сертификаты не найдены${NC}\n"
+        fi
     done
-    
+
     printf "\n"
     msg "Утилиты на роутере:"
     [ -x "/opt/bin/ssh" ] && printf "  SSH:          ${GREEN}Entware OK${NC}\n" || printf "  SSH:          ${RED}Missing${NC}\n"
@@ -768,6 +824,7 @@ do_start_service() {
 
 do_stop_service() {
     local name="$1"
+    load_service "$name" || return # Загружаем VPS для правильной очистки
     local pid_file
     pid_file=$(get_pid_file "$name")
 
@@ -779,7 +836,7 @@ do_stop_service() {
     local pid
     pid=$(cat "$pid_file")
     kill "$pid" 2>/dev/null
-    pkill -f "ssh.*:$name.*$VPS_HOST" 2>/dev/null
+    pkill -f "ssh.*:$SVC_TUNNEL_PORT:.*$VPS_HOST" 2>/dev/null
 
     rm -f "$pid_file"
     msg "Туннель '$name' остановлен"
@@ -802,190 +859,176 @@ do_stop_all() {
 }
 
 # ══════════════════════════════════════════════════════════════════════
-# НАСТРОЙКА VPS
+# НАСТРОЙКА VPS (Менеджер профилей)
 # ══════════════════════════════════════════════════════════════════════
 do_setup() {
-    clear_screen
-    draw_box "Настройка подключения к VPS"
-    printf "\n"
-
-    # Показать текущие настройки, если есть
-    if check_conf; then
-        printf "  ${DIM}Текущие настройки:${NC}\n"
-        printf "  Хост: ${BOLD}$VPS_HOST${NC}  Порт: ${BOLD}$VPS_PORT${NC}  Пользователь: ${BOLD}$VPS_USER${NC}  Авторизация: ${BOLD}$VPS_AUTH${NC}\n"
-        draw_separator
+    while true; do
+        clear_screen
+        draw_box "Управление VPS серверами"
         printf "\n"
+
+        local vps_list=""
+        local idx=0
+        for f in "$VPS_DIR"/*.conf; do
+            [ -f "$f" ] || continue
+            idx=$((idx + 1))
+            VPS_HOST="" # Сброс перед загрузкой
+            . "$f"
+            printf "  ${BOLD}%d)${NC}  %s  (${DIM}%s@%s:%s${NC})\n" "$idx" "$(basename "$f" .conf)" "$VPS_USER" "$VPS_HOST" "$VPS_PORT"
+            vps_list="$vps_list $(basename "$f" .conf)"
+        done
+
+        if [ "$idx" -eq 0 ]; then
+            printf "  ${YELLOW}Нет настроенных VPS серверов.${NC}\n"
+        fi
+
+        draw_separator
+        printf "  ${BOLD}n)${NC}  ➕  Добавить новый VPS\n"
+        [ "$idx" -gt 0 ] && printf "  ${BOLD}d)${NC}  ❌  Удалить VPS\n"
+        printf "  ${BOLD}0)${NC}  Назад\n"
+        
+        prompt "Выберите действие: "
+        case "$REPLY" in
+            0) return ;;
+            n|N) do_add_vps ;;
+            d|D) [ "$idx" -gt 0 ] && do_delete_vps_interactive "$vps_list" ;;
+            [1-9]*)
+                local sel_vps=$(echo "$vps_list" | cut -d' ' -f"$REPLY")
+                [ -n "$sel_vps" ] && do_add_vps "$sel_vps"
+                ;;
+        esac
+    done
+}
+
+do_delete_vps_interactive() {
+    local list="$1"
+    prompt "Введите номер VPS для удаления: "
+    local sel_vps=$(echo "$list" | cut -d' ' -f"$REPLY")
+    [ -z "$sel_vps" ] && { warn "Неверный выбор"; pause; return; }
+
+    prompt "Удалить профиль VPS '$sel_vps'? (д/н) [н]: "
+    case "$REPLY" in
+        д|Д|y|Y) rm -f "$VPS_DIR/$sel_vps.conf"; msg "Удалено" ;;
+        *) msg "Отменено" ;;
+    esac
+    pause
+}
+
+do_add_vps() {
+    local vps_id="${1:-}"
+    local is_new=0
+    [ -z "$vps_id" ] && is_new=1
+
+    if [ "$is_new" -eq 1 ]; then
+        prompt "Название сервера (например, amsterdam): "
+        vps_id=$(echo "$REPLY" | tr -dc 'a-zA-Z0-9_-')
+        [ -z "$vps_id" ] && { warn "Недопустимое название"; pause; return; }
     fi
 
-    prompt "IP-адрес VPS: "
-    local vps_host="$REPLY"
-    [ -z "$vps_host" ] && { warn "IP-адрес обязателен"; pause; return; }
+    local vps_file="$VPS_DIR/$vps_id.conf"
+    local v_host="" v_port="22" v_user="root" v_auth="key" v_pass=""
 
-    prompt "SSH порт [22]: "
-    local vps_port="${REPLY:-22}"
+    if [ -f "$vps_file" ]; then
+        . "$vps_file"
+        v_host="$VPS_HOST"; v_port="$VPS_PORT"; v_user="$VPS_USER"; v_auth="$VPS_AUTH"; v_pass="$VPS_PASS"
+    fi
 
-    prompt "SSH пользователь [root]: "
-    local vps_user="${REPLY:-root}"
+    header "Настройка VPS: $vps_id"
+    prompt "IP-адрес VPS [$v_host]: "
+    v_host="${REPLY:-$v_host}"
+    [ -z "$v_host" ] && { warn "IP обязателен"; pause; return; }
 
-    local ssh_exec="/opt/bin/ssh"
-    [ ! -f "$ssh_exec" ] && ssh_exec="ssh"
+    prompt "SSH порт [$v_port]: "
+    v_port="${REPLY:-$v_port}"
+
+    prompt "SSH пользователь [$v_user]: "
+    v_user="${REPLY:-$v_user}"
 
     printf "\n  Метод авторизации:\n"
     printf "  ${BOLD}1)${NC} SSH-ключ (рекомендуется)\n"
     printf "  ${BOLD}2)${NC} Пароль\n"
-    prompt "Выберите [1]: "
-    local auth_choice="${REPLY:-1}"
+    prompt "Выберите [${v_auth/key/1}${v_auth/password/2}]: "
+    local choice="${REPLY:-${v_auth/key/1}${v_auth/password/2}}"
 
-    local vps_auth="key"
-    local vps_pass=""
-
-    if [ "$auth_choice" = "2" ]; then
-        if command -v sshpass >/dev/null 2>&1; then
-            vps_auth="password"
-            printf "  SSH пароль: "
-            stty -echo 2>/dev/null
-            read -r vps_pass
-            stty echo 2>/dev/null
-            printf "\n"
-        else
-            printf "\n  ${YELLOW}⚠ Утилита sshpass не найдена.${NC}\n"
-            printf "    Для фоновой работы сервисов (туннелей) нужен либо пакет sshpass,\n"
-            printf "    либо использование SSH-ключа (рекомендуется).\n\n"
-            printf "    ${CYAN}Решение (Обход):${NC}\n"
-            printf "    Используйте вариант ${BOLD}1 (SSH-ключ)${NC}. Скрипт сам создаст ключ,\n"
-            printf "    попросит ваш пароль один раз, чтобы скопировать его на VPS,\n"
-            printf "    и дальше всё будет работать автоматически и БЕЗОПАСНО.\n"
-            pause
-            return
-        fi
+    if [ "$choice" = "2" ]; then
+        v_auth="password"
+        prompt "SSH пароль: "
+        v_pass="$REPLY"
     else
-        if [ ! -f "$SSH_KEY" ]; then
-            msg "Генерирую SSH-ключ (ed25519)..."
-            mkdir -p "$CONF_DIR"
-            
-            # Удаляем старые RSA ключи, если они есть (избегаем путаницы)
-            rm -f "$CONF_DIR/id_rsa" "$CONF_DIR/id_rsa.pub"
-
-            local keygen_cmd="/opt/bin/ssh-keygen"
-            [ ! -f "$keygen_cmd" ] && keygen_cmd="ssh-keygen"
-
-            # Создаем современный и компактный ed25519 ключ
-            # Он лучше всего совместим между OpenSSH и Dropbear
-            if ! $keygen_cmd -t ed25519 -f "$SSH_KEY" -N "" -q 2>/dev/null; then
-                # Танцы с бубном для старых версий
-                $keygen_cmd -t ed25519 -f "$SSH_KEY" -N ""
-            fi
-            
-            # Извлекаем публичный ключ, если он не создался
-            if [ ! -f "$SSH_KEY.pub" ] && [ -f "$SSH_KEY" ]; then
-                $keygen_cmd -y -f "$SSH_KEY" 2>/dev/null | grep "^ssh-ed25519" > "$SSH_KEY.pub"
-            fi
-            
-            if [ -f "$SSH_KEY" ]; then
-                chmod 600 "$SSH_KEY"
-                msg "Ключ создан: $SSH_KEY"
-            else
-                err "Не удалось создать SSH-ключ"
-                pause
-                return
-            fi
-        fi
+        v_auth="key"
+        # Проверка ключа (код ниже требует наличия SSH_KEY)
+        ensure_ssh_key
     fi
 
-    # Проверка подключения
-    printf "\n"
-    msg "Проверяю подключение к $vps_host..."
-    if [ "$vps_auth" = "password" ]; then
-        if ! sshpass -p "$vps_pass" $ssh_exec -o StrictHostKeyChecking=no -o ConnectTimeout=10 \
-            -p "$vps_port" "$vps_user@$vps_host" "echo ok" >/dev/null 2>&1; then
-            err "Не удалось подключиться к VPS. Проверьте параметры."
-            pause
-            return
+    msg "Проверяю подключение к $v_host..."
+    local ssh_exec="/opt/bin/ssh"
+    [ ! -f "$ssh_exec" ] && ssh_exec="ssh"
+
+    if [ "$v_auth" = "password" ]; then
+        if ! command -v sshpass >/dev/null 2>&1; then
+            err "Утилита sshpass не найдена."
+            pause; return
+        fi
+        if ! sshpass -p "$v_pass" $ssh_exec -o StrictHostKeyChecking=no -o ConnectTimeout=10 -p "$v_port" "$v_user@$v_host" "echo ok" >/dev/null 2>&1; then
+            err "Ошибка подключения."
+            pause; return
         fi
     else
-        msg "Копирую SSH-ключ на VPS..."
-        if [ ! -f "$SSH_KEY.pub" ]; then
-            err "Публичный ключ не найден: $SSH_KEY.pub"
-            pause
-            return
-        fi
-        
-        local copy_id_exec="/opt/bin/ssh-copy-id"
-        [ ! -f "$copy_id_exec" ] && copy_id_exec="ssh-copy-id"
-
+        # Копирование ключа
+        local copy_id="/opt/bin/ssh-copy-id"
+        [ ! -f "$copy_id" ] && copy_id="ssh-copy-id"
         printf "  Введите пароль VPS для копирования ключа:\n"
-        $copy_id_exec -i "$SSH_KEY.pub" -p "$vps_port" "$vps_user@$vps_host" 2>/dev/null || {
-            cat "$SSH_KEY.pub" | $ssh_exec -o StrictHostKeyChecking=no -p "$vps_port" "$vps_user@$vps_host" \
+        $copy_id -i "$SSH_KEY.pub" -p "$v_port" "$v_user@$v_host" 2>/dev/null || {
+            cat "$SSH_KEY.pub" | $ssh_exec -o StrictHostKeyChecking=no -p "$v_port" "$v_user@$v_host" \
                 "mkdir -p ~/.ssh && cat >> ~/.ssh/authorized_keys && chmod 700 ~/.ssh && chmod 600 ~/.ssh/authorized_keys"
         }
-
-        if ! $ssh_exec -o StrictHostKeyChecking=no -o ConnectTimeout=10 \
-            -i "$SSH_KEY" -p "$vps_port" "$vps_user@$vps_host" "echo ok" >/dev/null 2>&1; then
-            err "Не удалось подключиться к VPS по ключу."
-            pause
-            return
+        if ! $ssh_exec -o StrictHostKeyChecking=no -o ConnectTimeout=10 -i "$SSH_KEY" -p "$v_port" "$v_user@$v_host" "echo ok" >/dev/null 2>&1; then
+            err "Ошибка подключения по ключу."
+            pause; return
         fi
     fi
-    msg "Подключение успешно!"
 
-    # Настройка nginx на VPS
-    msg "Настраиваю nginx на VPS..."
-    local ssh_setup_cmd
-    if [ "$vps_auth" = "password" ]; then
-        ssh_setup_cmd="sshpass -p \"$vps_pass\" ssh -o StrictHostKeyChecking=no -p $vps_port $vps_user@$vps_host"
-    else
-        ssh_setup_cmd="ssh -o StrictHostKeyChecking=no -i $SSH_KEY -p $vps_port $vps_user@$vps_host"
-    fi
+    # Сохраняем
+    cat > "$vps_file" <<EOF
+VPS_HOST="$v_host"
+VPS_PORT="$v_port"
+VPS_USER="$v_user"
+VPS_AUTH="$v_auth"
+VPS_PASS="$v_pass"
+EOF
+    chmod 600 "$vps_file"
+    msg "Профиль '$vps_id' сохранён."
 
-    eval $ssh_setup_cmd "'
+    # Настройка Nginx на новом VPS
+    msg "Настройка окружения на VPS..."
+    VPS_HOST="$v_host" VPS_PORT="$v_port" VPS_USER="$v_user" VPS_AUTH="$v_auth" VPS_PASS="$v_pass"
+    ssh_cmd "
         if ! command -v nginx >/dev/null 2>&1; then
-            echo \"Устанавливаю nginx...\"
-            apt-get update -qq && apt-get install -y -qq nginx >/dev/null 2>&1 || \
-            yum install -y nginx >/dev/null 2>&1 || {
-                echo \"FAIL: не удалось установить nginx\"
-                exit 1
-            }
+            apt-get update -qq && apt-get install -y -qq nginx || yum install -y nginx
         fi
         mkdir -p /etc/nginx/sites-enabled
-        if ! grep -q \"include.*sites-enabled\" /etc/nginx/nginx.conf 2>/dev/null; then
-            sed -i \"/http {/a\\\\    include /etc/nginx/sites-enabled/*.conf;\" /etc/nginx/nginx.conf 2>/dev/null
-        fi
-
-        if ! command -v certbot >/dev/null 2>&1; then
-            echo \"Устанавливаю Certbot...\"
-            apt-get update -qq && apt-get install -y -qq certbot python3-certbot-nginx >/dev/null 2>&1 || \
-            yum install -y certbot python3-certbot-nginx >/dev/null 2>&1
-        fi
-
-        systemctl enable nginx 2>/dev/null
-        systemctl start nginx 2>/dev/null
-        echo OK
-    '" || {
-        warn "Не удалось автоматически настроить nginx. Убедитесь, что nginx установлен на VPS."
-    }
-
-    # Сохранение конфига
-    mkdir -p "$CONF_DIR" "$SERVICES_DIR" "$PID_DIR"
-    cat > "$CONF_FILE" <<EOF
-# rProxy — настройки VPS
-VPS_HOST="$vps_host"
-VPS_PORT="$vps_port"
-VPS_USER="$vps_user"
-VPS_AUTH="$vps_auth"
-VPS_PASS="$vps_pass"
-CERTBOT_EMAIL="$CERTBOT_EMAIL"
-EOF
-    chmod 600 "$CONF_FILE"
-
-    msg "Конфигурация сохранена!"
-    printf "\n  ${GREEN}${BOLD}VPS настроен и готов к работе.${NC}\n"
+        grep -q 'sites-enabled' /etc/nginx/nginx.conf || sed -i '/http {/a\    include /etc/nginx/sites-enabled/*.conf;' /etc/nginx/nginx.conf
+        command -v certbot >/dev/null 2>&1 || (apt-get update -qq && apt-get install -y -qq certbot python3-certbot-nginx || yum install -y certbot python3-certbot-nginx)
+        systemctl enable nginx && systemctl start nginx
+    "
     pause
+}
+
+ensure_ssh_key() {
+    if [ ! -f "$SSH_KEY" ]; then
+        msg "Генерирую SSH-ключ (ed25519)..."
+        local keygen="/opt/bin/ssh-keygen"
+        [ ! -f "$keygen" ] && keygen="ssh-keygen"
+        $keygen -t ed25519 -f "$SSH_KEY" -N "" -q
+        [ ! -f "$SSH_KEY.pub" ] && $keygen -y -f "$SSH_KEY" > "$SSH_KEY.pub"
+        chmod 600 "$SSH_KEY"
+    fi
 }
 
 # ══════════════════════════════════════════════════════════════════════
 # ТОЧКА ВХОДА
 # ══════════════════════════════════════════════════════════════════════
-mkdir -p "$CONF_DIR" "$SERVICES_DIR" "$PID_DIR" 2>/dev/null
+migrate_config 2>/dev/null
 
 # Поддержка прямых команд для init-скрипта и автоматизации
 case "${1:-}" in
@@ -996,12 +1039,15 @@ case "${1:-}" in
         check_conf || { err "VPS не настроен"; exit 1; }
         for f in "$SERVICES_DIR"/*.conf; do
             [ -f "$f" ] || continue
-            . "$f"
-            local state="остановлен"
-            is_running "$SVC_NAME" && state="работает"
-            local info="$SVC_NAME  $SVC_TARGET_HOST:$SVC_TARGET_PORT → :$SVC_EXT_PORT"
-            [ -n "$SVC_DOMAIN" ] && info="$info ($SVC_DOMAIN)"
-            echo "$info [$state]"
+            local name=$(basename "$f" .conf)
+            (
+                load_service "$name" >/dev/null 2>&1
+                local state="остановлен"
+                is_running "$SVC_NAME" && state="работает"
+                local info="$SVC_NAME  $SVC_TARGET_HOST:$SVC_TARGET_PORT → VPS($CUR_VPS_ID):$SVC_TUNNEL_PORT"
+                [ -n "$SVC_DOMAIN" ] && info="$info ($SVC_DOMAIN)"
+                echo "$info [$state]"
+            )
         done
         ;;
     -v|--version) echo "rProxy v$VERSION" ;;
