@@ -3,7 +3,7 @@
 # Публикация локальных сервисов через SSH-туннели + nginx на VPS
 # http://5.104.75.50:3000/Petro1990/rProxy
 
-VERSION="1.4.6"
+VERSION="1.4.7"
 CONF_DIR="/opt/etc/rproxy"
 CONF_FILE="$CONF_DIR/rproxy.conf"
 SERVICES_DIR="$CONF_DIR/services"
@@ -676,20 +676,20 @@ NGINXEOF
         ssh_cmd "certbot --nginx -d $domain --non-interactive --agree-tos -m $CERTBOT_EMAIL" || warn "Certbot вернул ошибку"
     fi
 
-    # Сохранение конфига сервиса
-    cat > "$SERVICES_DIR/$name.conf" <<EOF
-SVC_NAME="$name"
-SVC_VPS="$vps_id"
-SVC_TARGET_HOST="$t_host"
-SVC_TARGET_PORT="$t_port"
-SVC_TUNNEL_PORT="$tunnel_port"
-SVC_EXT_PORT="$ext_port"
-SVC_DOMAIN="$domain"
-SVC_SSL="$use_ssl"
-SVC_NDM_AUTH="$use_ndm_auth"
-SVC_HTPASSWD=\"$htpasswd_line\"
-SVC_ENABLED="yes"
-EOF
+    # Сохранение конфига сервиса (используем printf для защиты от спецсимволов и одинарные кавычки)
+    {
+        printf 'SVC_NAME="%s"\n' "$name"
+        printf 'SVC_VPS="%s"\n' "$vps_id"
+        printf 'SVC_TARGET_HOST="%s"\n' "$t_host"
+        printf 'SVC_TARGET_PORT="%s"\n' "$t_port"
+        printf 'SVC_TUNNEL_PORT="%s"\n' "$tunnel_port"
+        printf 'SVC_EXT_PORT="%s"\n' "$ext_port"
+        printf 'SVC_DOMAIN="%s"\n' "$domain"
+        printf 'SVC_SSL="%s"\n' "$use_ssl"
+        printf 'SVC_NDM_AUTH="%s"\n' "$use_ndm_auth"
+        printf "SVC_HTPASSWD='%s'\n" "$htpasswd_line"
+        printf 'SVC_ENABLED="yes"\n'
+    } > "$SERVICES_DIR/$name.conf"
 
     msg "Сервис '$name' добавлен на VPS '$vps_id'!"
     do_start_service "$name"
@@ -732,7 +732,7 @@ do_edit_interactive() {
         sleep 1
         # Обновление htpasswd на VPS если включено
         if [ "$SVC_NDM_AUTH" = "yes" ]; then
-             ssh_cmd "echo '$SVC_HTPASSWD' > /etc/nginx/rproxy_$name.htpasswd"
+             ssh_cmd "printf '%s\n' '$SVC_HTPASSWD' > /etc/nginx/rproxy_$name.htpasswd"
         fi
         do_start_service "$name"
     else
