@@ -171,25 +171,27 @@ main_menu() {
         draw_separator
         printf "  ${BOLD}4)${NC}  ▶️   Запустить туннель\n"
         printf "  ${BOLD}5)${NC}  ⏹️   Остановить туннель\n"
-        printf "  ${BOLD}6)${NC}  🔄  Перезапустить туннель\n"
-        draw_separator
-        printf "  ${BOLD}7)${NC}  🔒  Получить/Обновить SSL (Certbot)\n"
-        printf "  ${BOLD}8)${NC}  ⚙️   Настройки VPS\n"
-        printf "  ${BOLD}0)${NC}  🚪  Выход\n"
+    printf "  ${CYAN}${BOLD}6)${NC}  🔄  Перезапустить туннель\n"
+    draw_separator
+    printf "  ${BOLD}7)${NC}  🔒  Получить/Обновить SSL (Certbot)\n"
+    printf "  ${BOLD}8)${NC}  ⚙️   Настройки VPS\n"
+    printf "  ${BOLD}9)${NC}  🚀  Обновить rProxy\n"
+    printf "  ${BOLD}0)${NC}  🚪  Выход\n"
 
-        prompt "Выберите действие: "
+    prompt "Выберите действие: "
 
-        case "$REPLY" in
-            1) show_status ;;
-            2) do_add_interactive ;;
-            3) do_remove_interactive ;;
-            4) do_start_interactive ;;
-            5) do_stop_interactive ;;
-            6) do_restart_interactive ;;
-            7) do_ssl_interactive ;;
-            8) do_setup ;;
-            0|q) clear_screen; exit 0 ;;
-            *) ;;
+    case "$REPLY" in
+        1) show_status ;;
+        2) do_add_interactive ;;
+        3) do_remove_interactive ;;
+        4) do_start_interactive ;;
+        5) do_stop_interactive ;;
+        6) do_restart_interactive ;;
+        7) do_ssl_interactive ;;
+        8) do_setup ;;
+        9) do_self_update ;;
+        0|q) clear_screen; exit 0 ;;
+        *) ;;
         esac
     done
 }
@@ -462,10 +464,8 @@ do_ssl_interactive() {
     fi
 
     msg "Проверяю наличие Certbot на VPS..."
-    ssh_cmd "command -v certbot >/dev/null 2>&1 || (apt-get update && apt-get install -y certbot python3-certbot-nginx || yum install -y certbot python3-certbot-nginx)" || {
-        err "Не удалось установить Certbot на VPS"
-        pause
-        return
+    ssh_cmd "command -v certbot >/dev/null 2>&1 || (apt-get update -qq && apt-get install -y -qq certbot python3-certbot-nginx || yum install -y certbot python3-certbot-nginx)" || {
+        warn "Не удалось автоматически установить Certbot на VPS"
     }
 
     msg "Запрашиваю сертификат для $SVC_DOMAIN..."
@@ -477,6 +477,34 @@ do_ssl_interactive() {
     else
         err "Certbot не смог выпустить сертификат"
         warn "Убедитесь, что домен $SVC_DOMAIN указывает на этот VPS и порт 80 открыт"
+    fi
+    pause
+}
+
+# ══════════════════════════════════════════════════════════════════════
+# ОБНОВЛЕНИЕ СКРИПТА
+# ══════════════════════════════════════════════════════════════════════
+do_self_update() {
+    clear_screen
+    draw_box "Обновление rProxy"
+    printf "\n"
+    msg "Проверяю наличие обновлений..."
+    
+    local url="http://5.104.75.50:3000/Petro1990/rProxy/raw/branch/main/rproxy"
+    local tmp_file="/tmp/rproxy_update"
+    
+    if curl -sSL "$url" -o "$tmp_file"; then
+        if [ -s "$tmp_file" ]; then
+             mv "$tmp_file" "/opt/bin/rproxy"
+             chmod +x "/opt/bin/rproxy"
+             msg "Обновление успешно завершено!"
+             pause
+             exec /opt/bin/rproxy # Перезапуск новой версии
+        else
+             err "Файл обновления не пуст или не найден"
+        fi
+    else
+        err "Не удалось загрузить обновление"
     fi
     pause
 }
@@ -881,9 +909,10 @@ do_setup() {
             sed -i \"/http {/a\\\\    include /etc/nginx/sites-enabled/*.conf;\" /etc/nginx/nginx.conf 2>/dev/null
         fi
 
-        if ! ssh_cmd "command -v certbot" >/dev/null 2>&1; then
-            msg "Устанавливаю Certbot на VPS (может занять пару минут)..."
-            ssh_cmd "apt-get update -qq && apt-get install -y -qq certbot python3-certbot-nginx || yum install -y certbot python3-certbot-nginx" >/dev/null 2>&1
+        if ! command -v certbot >/dev/null 2>&1; then
+            echo \"Устанавливаю Certbot...\"
+            apt-get update -qq && apt-get install -y -qq certbot python3-certbot-nginx >/dev/null 2>&1 || \
+            yum install -y certbot python3-certbot-nginx >/dev/null 2>&1
         fi
 
         systemctl enable nginx 2>/dev/null
