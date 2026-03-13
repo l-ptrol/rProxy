@@ -3,7 +3,7 @@
 # Публикация локальных сервисов через SSH-туннели + nginx на VPS
 # http://5.104.75.50:3000/Petro1990/rProxy
 
-VERSION="1.1.1"
+VERSION="1.1.2"
 CONF_DIR="/opt/etc/rproxy"
 CONF_FILE="$CONF_DIR/rproxy.conf"
 SERVICES_DIR="$CONF_DIR/services"
@@ -352,10 +352,11 @@ select_vps_interactive() {
         vps_list="$vps_list $(basename "$f" .conf)"
     done
     
-    printf "  ${BOLD}n)${NC}  ➕  Добавить новый VPS\n"
-    prompt "Выберите номер или 'n': "
+    local next_idx=$((idx + 1))
+    printf "  ${BOLD}%d)${NC}  ➕  Добавить новый VPS\n" "$next_idx"
+    prompt "Выберите номер: "
     
-    if [ "$REPLY" = "n" ] || [ "$REPLY" = "N" ]; then
+    if [ "$REPLY" = "$next_idx" ]; then
         do_add_vps
         # Возвращаем последний созданный (упрощение)
         ls -t "$VPS_DIR"/*.conf | head -n 1 | xargs basename | sed 's/\.conf//'
@@ -717,12 +718,13 @@ select_service() {
         return 1
     fi
 
-    printf "  ${BOLD}a)${NC}  Все сервисы\n"
+    local all_idx=$((idx + 1))
+    printf "  ${BOLD}%d)${NC}  Все сервисы\n" "$all_idx"
     printf "  ${BOLD}0)${NC}  Назад\n"
     prompt "Выберите сервис: "
 
     [ "$REPLY" = "0" ] && { SELECTED_SERVICE=""; return 1; }
-    if [ "$REPLY" = "a" ] || [ "$REPLY" = "A" ] || [ "$REPLY" = "а" ] || [ "$REPLY" = "А" ]; then
+    if [ "$REPLY" = "$all_idx" ]; then
         SELECTED_SERVICE="__ALL__"
         return 0
     fi
@@ -900,16 +902,18 @@ do_setup() {
             printf "  ${YELLOW}Нет настроенных VPS серверов.${NC}\n"
         fi
 
+        local n_idx=$((idx + 1))
+        local d_idx=$((idx + 2))
         draw_separator
-        printf "  ${BOLD}n)${NC}  ➕  Добавить новый VPS\n"
-        [ "$idx" -gt 0 ] && printf "  ${BOLD}d)${NC}  ❌  Удалить VPS\n"
+        printf "  ${BOLD}%d)${NC}  ➕  Добавить новый VPS\n" "$n_idx"
+        [ "$idx" -gt 0 ] && printf "  ${BOLD}%d)${NC}  ❌  Удалить VPS\n" "$d_idx"
         printf "  ${BOLD}0)${NC}  Назад\n"
         
         prompt "Выберите действие: "
         case "$REPLY" in
             0) return ;;
-            n|N) do_add_vps ;;
-            d|D) [ "$idx" -gt 0 ] && do_delete_vps_interactive "$vps_list" ;;
+            "$n_idx") do_add_vps ;;
+            "$d_idx") [ "$idx" -gt 0 ] && do_delete_vps_interactive "$vps_list" ;;
             [1-9]*)
                 local sel_vps=$(echo "$vps_list" | cut -d' ' -f"$REPLY")
                 [ -n "$sel_vps" ] && do_add_vps "$sel_vps"
