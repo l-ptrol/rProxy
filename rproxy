@@ -3,7 +3,7 @@
 # Публикация локальных сервисов через SSH-туннели + nginx на VPS
 # http://5.104.75.50:3000/Petro1990/rProxy
 
-VERSION="1.3.6"
+VERSION="1.3.7"
 CONF_DIR="/opt/etc/rproxy"
 CONF_FILE="$CONF_DIR/rproxy.conf"
 SERVICES_DIR="$CONF_DIR/services"
@@ -557,7 +557,6 @@ do_add_interactive() {
 server {
     listen 80;
     server_name "$domain";
-    recursive_error_pages on;
 
     proxy_buffering off;
     proxy_request_buffering off;
@@ -600,7 +599,6 @@ NGINXEOF
         cat > "$tmp" << NGINXEOF
 server {
     listen $ext_port;
-    recursive_error_pages on;
 
     proxy_buffering off;
     proxy_request_buffering off;
@@ -1097,7 +1095,7 @@ do_start_service() {
 
     local ssh_opts="-o StrictHostKeyChecking=no -o ServerAliveInterval=10 -o ServerAliveCountMax=3 -o ConnectTimeout=10 -o ExitOnForwardFailure=yes"
     local tunnel_args="-R 0.0.0.0:$SVC_TUNNEL_PORT:$SVC_TARGET_HOST:$SVC_TARGET_PORT"
-    [ "$SVC_NDM_AUTH" = "yes" ] && tunnel_args="$tunnel_args -R 0.0.0.0:$((SVC_TUNNEL_PORT+1)):${SVC_ROUTER_IP:-127.0.0.1}:80"
+    [ "$SVC_NDM_AUTH" = "yes" ] && tunnel_args="$tunnel_args -R 0.0.0.0:$((SVC_TUNNEL_PORT+1)):${SVC_ROUTER_IP:-127.0.0.1}:79"
 
     if [ "$VPS_AUTH" = "password" ]; then
         AUTOSSH_GATETIME=0 sshpass -p "$VPS_PASS" autossh -M 0 -f -N \
