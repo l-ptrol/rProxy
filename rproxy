@@ -3,7 +3,7 @@
 # Публикация локальных сервисов через SSH-туннели + nginx на VPS
 # http://5.104.75.50:3000/Petro1990/rProxy
 
-VERSION="1.5.0"
+VERSION="1.5.1"
 CONF_DIR="/opt/etc/rproxy"
 CONF_FILE="$CONF_DIR/rproxy.conf"
 SERVICES_DIR="$CONF_DIR/services"
@@ -34,9 +34,7 @@ clear_screen() { printf "\033[2J\033[H"; }
 
 draw_box() {
     local title="$1"
-    printf "${CYAN}╔══════════════════════════════════════════════╗${NC}\n"
-    printf "${CYAN}║${NC}  ${BOLD}%-44s${NC}${CYAN}║${NC}\n" "$title"
-    printf "${CYAN}╚══════════════════════════════════════════════╝${NC}\n"
+    header "$title"
 }
 
 draw_separator() {
