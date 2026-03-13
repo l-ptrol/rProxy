@@ -3,7 +3,7 @@
 # Публикация локальных сервисов через SSH-туннели + nginx на VPS
 # http://5.104.75.50:3000/Petro1990/rProxy
 
-VERSION="1.5.5"
+VERSION="1.6.0"
 export PATH="/opt/bin:/opt/sbin:$PATH"
 CONF_DIR="/opt/etc/rproxy"
 CONF_FILE="$CONF_DIR/rproxy.conf"
@@ -136,68 +136,45 @@ EOF
 ensure_local_deps() {
     local missing=""
     
-    # Внутренняя функция для надежной проверки
     _has_cmd() {
         command -v "$1" >/dev/null 2>&1 || [ -x "/opt/bin/$1" ] || [ -x "/opt/sbin/$1" ]
     }
 
-    # Проверка openssl
-    if ! _has_cmd openssl; then
-        missing="$missing openssl-util"
-    fi
-    
-    # Проверка sshpass
-    if ! _has_cmd sshpass; then
-        missing="$missing sshpass"
-    fi
-    
-    # Проверка curl
-    if ! _has_cmd curl; then
-        missing="$missing curl"
-    fi
+    _has_cmd openssl || missing="$missing openssl-util"
+    _has_cmd curl    || missing="$missing curl"
     
     if [ -n "$missing" ]; then
-        msg "Обнаружены недостающие зависимости:$missing"
-        msg "Устанавливаю через opkg..."
-        opkg update >/dev/null 2>&1
+        warn "Обнаружены недостающие пакеты:$missing"
+        msg "Попытка автоматической установки через opkg..."
+        
+        if ! opkg update; then
+            err "Не удалось обновить списки пакетов opkg. Проверьте интернет на роутере."
+            return 1
+        fi
+
         for pkg in $missing; do
             msg "Установка $pkg..."
-            opkg install "$pkg" >/dev/null 2>&1
+            if opkg install "$pkg"; then
+                msg "Пакет $pkg успешно установлен."
+            else
+                err "Не удалось установить $pkg. Возможно, его нет в репозитории вашей модели."
+            fi
         done
         hash -r 2>/dev/null
-        msg "Все зависимости установлены."
+        msg "Проверка зависимостей завершена."
     fi
 }
 
 ssh_cmd() {
     local ssh_exec="/opt/bin/ssh"
     [ ! -f "$ssh_exec" ] && ssh_exec="ssh"
-
-    if [ "$VPS_AUTH" = "password" ]; then
-        if ! command -v sshpass >/dev/null 2>&1; then
-            err "Утилита sshpass не найдена. Авторизация по паролю невозможна."
-            err "Пожалуйста, перенастройте rProxy на использование SSH-ключа (rproxy setup)."
-            return 1
-        fi
-        sshpass -p "$VPS_PASS" $ssh_exec -q -o StrictHostKeyChecking=no -o LogLevel=ERROR -p "$VPS_PORT" "$VPS_USER@$VPS_HOST" "$@"
-    else
-        $ssh_exec -q -o StrictHostKeyChecking=no -o LogLevel=ERROR -i "$SSH_KEY" -p "$VPS_PORT" "$VPS_USER@$VPS_HOST" "$@"
-    fi
+    $ssh_exec -q -o StrictHostKeyChecking=no -o LogLevel=ERROR -i "$SSH_KEY" -p "$VPS_PORT" "$VPS_USER@$VPS_HOST" "$@"
 }
 
 scp_cmd() {
     local scp_exec="/opt/bin/scp"
     [ ! -f "$scp_exec" ] && scp_exec="scp"
-
-    if [ "$VPS_AUTH" = "password" ]; then
-        if ! command -v sshpass >/dev/null 2>&1; then
-            err "Утилита sshpass не найдена. Копирование по паролю невозможно."
-            return 1
-        fi
-        sshpass -p "$VPS_PASS" $scp_exec -q -o StrictHostKeyChecking=no -o LogLevel=ERROR -P "$VPS_PORT" "$@"
-    else
-        $scp_exec -q -o StrictHostKeyChecking=no -o LogLevel=ERROR -i "$SSH_KEY" -P "$VPS_PORT" "$@"
-    fi
+    $scp_exec -q -o StrictHostKeyChecking=no -o LogLevel=ERROR -i "$SSH_KEY" -P "$VPS_PORT" "$@"
 }
 
 next_free_port() {
@@ -1325,11 +1302,11 @@ do_add_vps() {
     fi
 
     local vps_file="$VPS_DIR/$vps_id.conf"
-    local v_host="" v_port="22" v_user="root" v_auth="key" v_pass=""
+    local v_host="" v_port="22" v_user="root"
 
     if [ -f "$vps_file" ]; then
         . "$vps_file"
-        v_host="$VPS_HOST"; v_port="$VPS_PORT"; v_user="$VPS_USER"; v_auth="$VPS_AUTH"; v_pass="$VPS_PASS"
+        v_host="$VPS_HOST"; v_port="$VPS_PORT"; v_user="$VPS_USER"
     fi
 
     header "Настройка VPS: $vps_id"
@@ -1343,67 +1320,44 @@ do_add_vps() {
     prompt "SSH пользователь [$v_user]: "
     v_user="${REPLY:-$v_user}"
 
-    printf "\n  Метод авторизации:\n"
-    printf "  ${BOLD}1)${NC} SSH-ключ (рекомендуется)\n"
-    printf "  ${BOLD}2)${NC} Пароль\n"
-    prompt "Выберите [${v_auth/key/1}${v_auth/password/2}]: "
-    local choice="${REPLY:-${v_auth/key/1}${v_auth/password/2}}"
-
-    if [ "$choice" = "2" ]; then
-        v_auth="password"
-        prompt "SSH пароль: "
-        v_pass="$REPLY"
-    else
-        v_auth="key"
-        # Проверка ключа (код ниже требует наличия SSH_KEY)
-        ensure_ssh_key
-    fi
-
-    msg "Проверяю подключение к $v_host..."
+    # Настройка ключей
+    ensure_ssh_key
+    
+    msg "Настраиваю доступ по SSH-ключу для $v_host..."
+    
+    # Копирование ключа (пароль запросит сама система)
     local ssh_exec="/opt/bin/ssh"
     [ ! -f "$ssh_exec" ] && ssh_exec="ssh"
+    local copy_id="/opt/bin/ssh-copy-id"
+    [ ! -f "$copy_id" ] && copy_id="ssh-copy-id"
+    
+    printf "  ${YELLOW}Сейчас будет запрошен пароль VPS для копирования ключа${NC}\n"
+    $copy_id -o StrictHostKeyChecking=no -i "$SSH_KEY.pub" -p "$v_port" "$v_user@$v_host" 2>/dev/null || {
+        cat "$SSH_KEY.pub" | $ssh_exec -o StrictHostKeyChecking=no -p "$v_port" "$v_user@$v_host" \
+            "mkdir -p ~/.ssh && cat >> ~/.ssh/authorized_keys && chmod 700 ~/.ssh && chmod 600 ~/.ssh/authorized_keys"
+    }
 
-    if [ "$v_auth" = "password" ]; then
-        if ! command -v sshpass >/dev/null 2>&1; then
-            err "Утилита sshpass не найдена."
-            pause; return
-        fi
-        if ! sshpass -p "$v_pass" $ssh_exec -o StrictHostKeyChecking=no -o ConnectTimeout=10 -p "$v_port" "$v_user@$v_host" "echo ok" >/dev/null 2>&1; then
-            err "Ошибка подключения."
-            pause; return
-        fi
-    else
-        # Копирование ключа
-        local copy_id="/opt/bin/ssh-copy-id"
-        [ ! -f "$copy_id" ] && copy_id="ssh-copy-id"
-        printf "  Введите пароль VPS для копирования ключа:\n"
-        $copy_id -i "$SSH_KEY.pub" -p "$v_port" "$v_user@$v_host" 2>/dev/null || {
-            cat "$SSH_KEY.pub" | $ssh_exec -o StrictHostKeyChecking=no -p "$v_port" "$v_user@$v_host" \
-                "mkdir -p ~/.ssh && cat >> ~/.ssh/authorized_keys && chmod 700 ~/.ssh && chmod 600 ~/.ssh/authorized_keys"
-        }
-        if ! $ssh_exec -o StrictHostKeyChecking=no -o ConnectTimeout=10 -i "$SSH_KEY" -p "$v_port" "$v_user@$v_host" "echo ok" >/dev/null 2>&1; then
-            err "Ошибка подключения по ключу."
-            pause; return
-        fi
+    if ! $ssh_exec -o StrictHostKeyChecking=no -o ConnectTimeout=10 -i "$SSH_KEY" -p "$v_port" "$v_user@$v_host" "echo ok" >/dev/null 2>&1; then
+        err "Ошибка подключения по ключу. Убедитесь, что пароль введен верно."
+        pause; return
     fi
 
-    # Сохраняем
+    # Сохраняем (БЕЗ ПАРОЛЯ)
     cat > "$vps_file" <<EOF
 VPS_HOST="$v_host"
 VPS_PORT="$v_port"
 VPS_USER="$v_user"
-VPS_AUTH="$v_auth"
-VPS_PASS="$v_pass"
+VPS_AUTH="key"
 EOF
     chmod 600 "$vps_file"
-    msg "Профиль '$vps_id' сохранён."
+    msg "Профиль '$vps_id' сохранён (авторизация по ключу)."
 
     # Настройка Nginx на новом VPS
     msg "Настройка окружения на VPS..."
-    VPS_HOST="$v_host" VPS_PORT="$v_port" VPS_USER="$v_user" VPS_AUTH="$v_auth" VPS_PASS="$v_pass"
+    VPS_HOST="$v_host" VPS_PORT="$v_port" VPS_USER="$v_user" VPS_AUTH="key"
     ssh_cmd "
         if ! command -v nginx >/dev/null 2>&1; then
-            apt-get update -qq && apt-get install -y -qq nginx || yum install -y nginx
+            apt-get update -qq && apt-get install -y -qq nginx || (yum update -y && yum install -y nginx)
         fi
         mkdir -p /etc/nginx/sites-enabled
         grep -q 'sites-enabled' /etc/nginx/nginx.conf || sed -i '/http {/a\    include /etc/nginx/sites-enabled/*.conf;' /etc/nginx/nginx.conf
