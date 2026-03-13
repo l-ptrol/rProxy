@@ -11,6 +11,7 @@ PID_DIR="/opt/var/run/rproxy"
 SSH_KEY="$CONF_DIR/id_ed25519"
 REMOTE_NGINX_DIR="/etc/nginx/sites-enabled"
 BASE_TUNNEL_PORT=10000
+CERTBOT_EMAIL="" # Будет заполнено из конфига
 
 # ─── Цвета ───────────────────────────────────────────────────────────
 RED='\033[0;31m'
@@ -244,7 +245,7 @@ do_add_interactive() {
     printf "\n"
 
     prompt "Название сервиса (латиницей, без пробелов): "
-    local name="$REPLY"
+    local name=$(echo "$REPLY" | tr ' ' '_' | tr -cd '[:alnum:]_-')
     [ -z "$name" ] && { warn "Название не может быть пустым"; pause; return; }
 
     if [ -f "$SERVICES_DIR/$name.conf" ]; then
@@ -265,17 +266,36 @@ do_add_interactive() {
 
     local domain=""
     local ext_port=""
+    local use_ssl="no"
 
     if [ "$mode" = "1" ]; then
         prompt "Доменное имя (например, mysite.example.com): "
         domain="$REPLY"
         [ -z "$domain" ] && { warn "Домен не указан"; pause; return; }
         ext_port=80
+        
+        printf "\n  Включить SSL (HTTPS) через Certbot? (д/н) [н]: "
+        read -r use_ssl_ans
+        case "$use_ssl_ans" in
+            д|Д|y|Y|да|yes) 
+                use_ssl="yes" 
+                ext_port=443
+                if [ -z "$CERTBOT_EMAIL" ]; then
+                    prompt "Введите Email для регистрации сертификатов: "
+                    CERTBOT_EMAIL="$REPLY"
+                    # Сохраняем email в конфиг
+                    sed -i "/CERTBOT_EMAIL=/d" "$CONF_FILE"
+                    echo "CERTBOT_EMAIL=\"$CERTBOT_EMAIL\"" >> "$CONF_FILE"
+                fi
+                ;;
+            *) use_ssl="no" ;;
+        esac
     else
         local suggested
         suggested=$(next_free_port)
         prompt "Внешний порт [$suggested]: "
         ext_port="${REPLY:-$suggested}"
+        use_ssl="no"
     fi
 
     # Разбор адреса
@@ -296,6 +316,7 @@ do_add_interactive() {
     printf "  ${BOLD}Туннель:${NC}       порт $tunnel_port\n"
     [ -n "$domain" ] && printf "  ${BOLD}Домен:${NC}         $domain\n"
     printf "  ${BOLD}Внешний порт:${NC}  $ext_port\n"
+    [ "$use_ssl" = "yes" ] && printf "  ${BOLD}SSL:${NC}           Включен (Certbot)\n"
     draw_separator
 
     prompt "Всё верно? Добавить сервис? (д/н) [д]: "
@@ -311,6 +332,8 @@ do_add_interactive() {
     # Генерация конфига nginx
     local nginx_conf=""
     if [ -n "$domain" ]; then
+        # Для домена всегда сначала создаем конфиг на 80 порт
+        # Если нужен SSL, Certbot сам его проапгрейдит
         nginx_conf="# rProxy: $name
 server {
     listen 80;
@@ -354,6 +377,7 @@ server {
     fi
 
     # Деплой nginx конфига на VPS
+    msg "Загружаю конфигурацию nginx..."
     local tmp_file="/tmp/rproxy_nginx_$name.conf"
     printf '%s' "$nginx_conf" > "$tmp_file"
     scp_cmd "$tmp_file" "$VPS_USER@$VPS_HOST:$REMOTE_NGINX_DIR/rproxy_$name.conf" || {
@@ -364,13 +388,25 @@ server {
     }
     rm -f "$tmp_file"
 
-    # Перезагрузка nginx
-    ssh_cmd "nginx -t && systemctl reload nginx" || {
-        err "Ошибка конфигурации nginx на VPS"
+    # Проверка и перезагрузка nginx
+    ssh_cmd "nginx -t" >/dev/null 2>&1 || {
+        err "Ошибка в конфигурации nginx на VPS"
         ssh_cmd "rm -f $REMOTE_NGINX_DIR/rproxy_$name.conf"
         pause
         return
     }
+    ssh_cmd "systemctl reload nginx" >/dev/null 2>&1
+
+    # Получение SSL сертификата если нужно
+    if [ "$use_ssl" = "yes" ]; then
+        msg "Получаю SSL сертификат через Certbot (может занять время)..."
+        ssh_cmd "certbot --nginx -d $domain --non-interactive --agree-tos -m $CERTBOT_EMAIL" || {
+            warn "Certbot не смог получить сертификат. Проверьте DNS и доступность порта 80."
+            use_ssl="no"
+            ext_port=80
+        }
+    fi
+
 
     # Сохранение конфига сервиса
     cat > "$SERVICES_DIR/$name.conf" <<EOF
@@ -381,6 +417,7 @@ SVC_TARGET_PORT="$target_port"
 SVC_TUNNEL_PORT="$tunnel_port"
 SVC_EXT_PORT="$ext_port"
 SVC_DOMAIN="$domain"
+SVC_SSL="$use_ssl"
 SVC_ENABLED="yes"
 EOF
 
@@ -790,6 +827,13 @@ do_setup() {
         if ! grep -q \"include.*sites-enabled\" /etc/nginx/nginx.conf 2>/dev/null; then
             sed -i \"/http {/a\\\\    include /etc/nginx/sites-enabled/*.conf;\" /etc/nginx/nginx.conf 2>/dev/null
         fi
+
+        if ! command -v certbot >/dev/null 2>&1; then
+            echo \"Устанавливаю Certbot...\"
+            apt-get install -y -qq certbot python3-certbot-nginx >/dev/null 2>&1 || \
+            yum install -y certbot python3-certbot-nginx >/dev/null 2>&1
+        fi
+
         systemctl enable nginx 2>/dev/null
         systemctl start nginx 2>/dev/null
         echo OK
@@ -806,6 +850,7 @@ VPS_PORT="$vps_port"
 VPS_USER="$vps_user"
 VPS_AUTH="$vps_auth"
 VPS_PASS="$vps_pass"
+CERTBOT_EMAIL="$CERTBOT_EMAIL"
 EOF
     chmod 600 "$CONF_FILE"
 
