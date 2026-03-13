@@ -3,7 +3,7 @@
 # Публикация локальных сервисов через SSH-туннели + nginx на VPS
 # http://5.104.75.50:3000/Petro1990/rProxy
 
-VERSION="1.0.6"
+VERSION="1.0.8"
 CONF_DIR="/opt/etc/rproxy"
 CONF_FILE="$CONF_DIR/rproxy.conf"
 SERVICES_DIR="$CONF_DIR/services"
@@ -296,29 +296,24 @@ show_status() {
 # ПОМОЩНИКИ VPS
 # ══════════════════════════════════════════════════════════════════════
 
+
 find_vps_by_domain() {
     local dom="$1"
-    msg "Отладка: Резолвлю $dom..." >&2
     # Пытаемся получить IP через ping (BusyBox стиль)
     local ip=$(ping -c 1 "$dom" 2>/dev/null | grep -o "[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}" | head -n 1)
     # Если не вышло, пробуем nslookup (парсим более надежно через grep -o)
     [ -z "$ip" ] && ip=$(nslookup "$dom" 2>/dev/null | grep "Address" | tail -n 1 | grep -o "[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}" | head -n 1)
     
-    msg "Отладка: Получен IP: '$ip'" >&2
     [ -z "$ip" ] && return 1
 
     for f in "$VPS_DIR"/*.conf; do
         [ -f "$f" ] || continue
-        (
-            VPS_HOST=""
-            . "$f"
-            msg "Отладка: Сравниваю с VPS '$(basename "$f" .conf)' (HOST: $VPS_HOST)" >&2
-            if [ "$VPS_HOST" = "$ip" ]; then
-                basename "$f" .conf
-                exit 0
-            fi
-            exit 1
-        ) && { basename "$f" .conf; return 0; }
+        # Используем grep для извлечения IP из конфига (быстрее и надежнее источника)
+        local v_host=$(grep "VPS_HOST=" "$f" | cut -d'"' -f2)
+        if [ "$v_host" = "$ip" ]; then
+            basename "$f" .conf
+            return 0
+        fi
     done
     return 1
 }
