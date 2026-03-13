@@ -3,7 +3,7 @@
 # Публикация локальных сервисов через SSH-туннели + nginx на VPS
 # http://5.104.75.50:3000/Petro1990/rProxy
 
-VERSION="1.2.4"
+VERSION="1.3.0"
 CONF_DIR="/opt/etc/rproxy"
 CONF_FILE="$CONF_DIR/rproxy.conf"
 SERVICES_DIR="$CONF_DIR/services"
@@ -473,6 +473,12 @@ do_add_interactive() {
     printf "  ${BOLD}Туннель:${NC}       порт $tunnel_port\n"
     [ -n "$domain" ] && printf "  ${BOLD}Домен:${NC}         $domain\n"
     printf "  ${BOLD}Внешний порт:${NC}  $ext_port\n"
+    prompt "Защитить сервис паролем от роутера? (д/н) [н]: "
+    local use_ndm_auth="no"
+    case "$REPLY" in
+        д|Д|y|Y|да|yes) use_ndm_auth="yes" ;;
+    esac
+
     draw_separator
 
     prompt "Всё верно? Добавить сервис? (д/н) [д]: "
@@ -483,6 +489,21 @@ do_add_interactive() {
     # Стелс-режим: прикидываемся локальным запросом
     local stealth_host="$t_host"
     [ "$t_port" != "80" ] && stealth_host="$t_host:$t_port"
+
+    # Конфигурация авторизации
+    local auth_config=""
+    if [ "$use_ndm_auth" = "yes" ]; then
+        local auth_port=$((tunnel_port + 1))
+        auth_config="
+    location /rproxy_auth {
+        internal;
+        proxy_pass http://127.0.0.1:$auth_port/rci/system/hostname;
+        proxy_pass_request_body off;
+        proxy_set_header Content-Length \"\";
+        proxy_set_header Authorization \$http_authorization;
+    }
+    "
+    fi
 
     # Генерация конфига nginx
     local tmp="/tmp/rproxy_$name.conf"
@@ -499,6 +520,7 @@ server {
     proxy_busy_buffers_size 256k;
 
     location / {
+        $( [ "$use_ndm_auth" = "yes" ] && echo "auth_request /rproxy_auth;" )
         proxy_pass http://127.0.0.1:$tunnel_port;
         proxy_http_version 1.1;
         proxy_set_header Upgrade \$http_upgrade;
@@ -524,6 +546,7 @@ server {
         proxy_send_timeout 60s;
         proxy_read_timeout 60s;
     }
+    $auth_config
 }
 NGINXEOF
     else
@@ -538,6 +561,7 @@ server {
     proxy_busy_buffers_size 256k;
 
     location / {
+        $( [ "$use_ndm_auth" = "yes" ] && echo "auth_request /rproxy_auth;" )
         proxy_pass http://127.0.0.1:$tunnel_port;
         proxy_http_version 1.1;
         proxy_set_header Upgrade \$http_upgrade;
@@ -563,6 +587,7 @@ server {
         proxy_send_timeout 60s;
         proxy_read_timeout 60s;
     }
+    $auth_config
 }
 NGINXEOF
     fi
@@ -587,6 +612,7 @@ SVC_TUNNEL_PORT="$tunnel_port"
 SVC_EXT_PORT="$ext_port"
 SVC_DOMAIN="$domain"
 SVC_SSL="$use_ssl"
+SVC_NDM_AUTH="$use_ndm_auth"
 SVC_ENABLED="yes"
 EOF
 
@@ -1016,19 +1042,21 @@ do_start_service() {
     pid_file=$(get_pid_file "$name")
 
     local ssh_opts="-o StrictHostKeyChecking=no -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o ExitOnForwardFailure=yes"
+    local tunnel_args="-R 0.0.0.0:$SVC_TUNNEL_PORT:$SVC_TARGET_HOST:$SVC_TARGET_PORT"
+    [ "$SVC_NDM_AUTH" = "yes" ] && tunnel_args="$tunnel_args -R 0.0.0.0:$((SVC_TUNNEL_PORT+1)):127.0.0.1:80"
 
     if [ "$VPS_AUTH" = "password" ]; then
         AUTOSSH_GATETIME=0 sshpass -p "$VPS_PASS" autossh -M 0 -f -N \
             $ssh_opts \
             -p "$VPS_PORT" \
-            -R "0.0.0.0:$SVC_TUNNEL_PORT:$SVC_TARGET_HOST:$SVC_TARGET_PORT" \
+            $tunnel_args \
             "$VPS_USER@$VPS_HOST" &
     else
         AUTOSSH_GATETIME=0 autossh -M 0 -f -N \
             $ssh_opts \
             -i "$SSH_KEY" \
             -p "$VPS_PORT" \
-            -R "0.0.0.0:$SVC_TUNNEL_PORT:$SVC_TARGET_HOST:$SVC_TARGET_PORT" \
+            $tunnel_args \
             "$VPS_USER@$VPS_HOST" &
     fi
 
