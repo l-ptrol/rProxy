@@ -3,7 +3,7 @@
 # Публикация локальных сервисов через SSH-туннели + nginx на VPS
 # http://5.104.75.50:3000/Petro1990/rProxy
 
-VERSION="1.0.5"
+VERSION="1.0.6"
 CONF_DIR="/opt/etc/rproxy"
 CONF_FILE="$CONF_DIR/rproxy.conf"
 SERVICES_DIR="$CONF_DIR/services"
@@ -300,8 +300,8 @@ find_vps_by_domain() {
     local dom="$1"
     # Пытаемся получить IP через ping (BusyBox стиль)
     local ip=$(ping -c 1 "$dom" 2>/dev/null | grep -o "[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}" | head -n 1)
-    # Если не вышло, пробуем nslookup
-    [ -z "$ip" ] && ip=$(nslookup "$dom" 2>/dev/null | grep "Address" | tail -n 1 | awk '{print $2}')
+    # Если не вышло, пробуем nslookup (парсим более надежно через grep -o)
+    [ -z "$ip" ] && ip=$(nslookup "$dom" 2>/dev/null | grep "Address" | tail -n 1 | grep -o "[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}" | head -n 1)
     
     [ -z "$ip" ] && return 1
 
