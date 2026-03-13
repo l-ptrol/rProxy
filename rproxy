@@ -3,7 +3,7 @@
 # Публикация локальных сервисов через SSH-туннели + nginx на VPS
 # http://5.104.75.50:3000/Petro1990/rProxy
 
-VERSION="1.4.4"
+VERSION="1.4.5"
 CONF_DIR="/opt/etc/rproxy"
 CONF_FILE="$CONF_DIR/rproxy.conf"
 SERVICES_DIR="$CONF_DIR/services"
@@ -61,7 +61,7 @@ check_conf() {
     # Строгая проверка: ищем хотя бы один файл в vps/, в котором заполнена переменная VPS_HOST
     for f in "$VPS_DIR"/*.conf; do
         [ -f "$f" ] || continue
-        if grep -qE "VPS_HOST=['\"]?[0-9]" "$f"; then
+        if grep -qE "VPS_HOST=['\"]?[^'\" ]+" "$f"; then
             return 0
         fi
     done
@@ -100,9 +100,9 @@ load_vps() {
 migrate_config() {
     mkdir -p "$VPS_DIR" "$SERVICES_DIR" "$PID_DIR"
     
-    # Проверка на "битый" (пустой) конфиг после неудачной миграции (1.0.7-1.1.0)
+    # Проверка на "битый" (пустой) конфиг
     local broken=0
-    [ -f "$VPS_DIR/default.conf" ] && ! grep -q "VPS_HOST=\"[0-9]" "$VPS_DIR/default.conf" && broken=1
+    [ -f "$VPS_DIR/default.conf" ] && ! grep -q "VPS_HOST=" "$VPS_DIR/default.conf" && broken=1
 
     if [ -f "$CONF_FILE" ] && { [ ! -f "$VPS_DIR/default.conf" ] || [ "$broken" -eq 1 ]; }; then
         # Если rproxy.conf ещё содержит данные серверов (не пустой)
@@ -126,9 +126,8 @@ EOF
         [ -f "$VPS_DIR/default.conf" ] && chmod 600 "$VPS_DIR/default.conf"
     fi
 
-    # Если профиль default остался битым и восстановить нечего — удаляем его,
-    # чтобы check_conf сработал и предложил настройку заново
-    if [ -f "$VPS_DIR/default.conf" ] && ! grep -q "VPS_HOST=\"[0-9]" "$VPS_DIR/default.conf"; then
+    # Если профиль default остался битым и восстановить нечего — удаляем его
+    if [ -f "$VPS_DIR/default.conf" ] && ! grep -q "VPS_HOST=" "$VPS_DIR/default.conf"; then
         rm -f "$VPS_DIR/default.conf"
     fi
 }
