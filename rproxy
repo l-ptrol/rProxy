@@ -3,7 +3,7 @@
 # Публикация локальных сервисов через SSH-туннели + nginx на VPS
 # http://5.104.75.50:3000/Petro1990/rProxy
 
-VERSION="1.6.2"
+VERSION="1.6.3"
 export PATH="/opt/bin:/opt/sbin:$PATH"
 CONF_DIR="/opt/etc/rproxy"
 CONF_FILE="$CONF_DIR/rproxy.conf"
@@ -581,10 +581,6 @@ do_add_interactive() {
 
     msg "Добавляю сервис '$name'..."
 
-    # Стелс-режим: прикидываемся локальным запросом
-    local stealth_host="$t_host"
-    [ "$t_port" != "80" ] && stealth_host="$t_host:$t_port"
-
     # Конфигурация авторизации
     local auth_config=""
     if [ "$use_ndm_auth" = "yes" ]; then
@@ -594,30 +590,8 @@ do_add_interactive() {
     "
     fi
 
-    # Генерация конфига nginx
     local tmp="/tmp/rproxy_$name.conf"
     generate_nginx_conf "$name" "$t_host" "$t_port" "$tunnel_port" "$domain" "$ext_port" "$use_ndm_auth" "$tmp"
-        proxy_set_header Referer "http://$stealth_host/";
-
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
-        proxy_set_header X-Forwarded-Host \$http_host;
-        proxy_set_header X-Forwarded-Port \$server_port;
-        
-        # Трансляция куки: меняем локальный IP обратно на домен в браузере
-        proxy_cookie_domain "$t_host" "\$host";
-        proxy_cookie_path / "/; SameSite=Lax";
-        
-        proxy_hide_header X-Frame-Options;
-        proxy_connect_timeout 60s;
-        proxy_send_timeout 60s;
-        proxy_read_timeout 60s;
-    }
-    $auth_config
-}
-NGINXEOF
-    fi
 
     # Деплой
     # Деплой htpasswd если нужно
@@ -630,6 +604,7 @@ NGINXEOF
 
     # Деплой nginx
     scp_cmd "$tmp" "$VPS_USER@$VPS_HOST:$REMOTE_NGINX_DIR/rproxy_$name.conf" || { err "Ошибка деплоя nginx"; rm -f "$tmp"; pause; return; }
+    rm -f "$tmp"
     ssh_cmd "nginx -t && systemctl reload nginx" >/dev/null 2>&1
 
     # SSL если нужно
@@ -688,62 +663,22 @@ do_edit_interactive() {
     sed -i "s/SVC_TARGET_HOST=.*/SVC_TARGET_HOST=\"$new_host\"/" "$SERVICES_DIR/$name.conf"
     sed -i "s/SVC_TARGET_PORT=.*/SVC_TARGET_PORT=\"$new_port\"/" "$SERVICES_DIR/$name.conf"
 
-    # Перегенерация и деплой конфига Nginx на VPS (важно для стелс-режима и портов)
+    # Перегенерация и деплой конфига Nginx на VPS
     msg "Обновляю конфигурацию Nginx на VPS..."
     load_service "$name" # Перезагружаем переменные
     
-    local t_host="$SVC_TARGET_HOST"
-    local t_port="$SVC_TARGET_PORT"
-    local tunnel_port="$SVC_TUNNEL_PORT"
-    local domain="$SVC_DOMAIN"
-    local ext_port="$SVC_EXT_PORT"
-    local use_ssl="$SVC_SSL"
-    local use_ndm_auth="$SVC_NDM_AUTH"
-    local htpasswd_line="$SVC_HTPASSWD"
-    
-    # Генерация заново
-    local stealth_host="$t_host"
-    [ "$t_port" != "80" ] && stealth_host="$t_host:$t_port"
-    
-    local auth_config=""
-    if [ "$use_ndm_auth" = "yes" ]; then
-        auth_config="
-    auth_basic \"Restricted Access\";
-    auth_basic_user_file /etc/nginx/rproxy_$name.htpasswd;
-    "
-    fi
-    
     local tmp="/tmp/rproxy_edit_$name.conf"
-    # (Здесь должна быть логика генерации как в do_add_interactive)
-    # Для краткости вызовем внутреннюю функцию или повторим блок
-    if [ -n "$domain" ]; then
-        cat > "$tmp" << NGINXEOF
-server {
-    listen 80;
-    server_name "$domain";
-    proxy_buffering off;
-    proxy_request_buffering off;
-    location / {
-        $auth_config
-        proxy_pass http://127.0.0.1:$tunnel_port;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade \$http_upgrade;
-        proxy_set_header Connection "upgrade";
-        proxy_set_header Host "$stealth_host";
-        proxy_set_header Origin "http://$stealth_host";
-        proxy_set_header Referer "http://$stealth_host/";
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
-        proxy_cookie_domain "$t_host" "\$host";
-    }
-}
-NGINXEOF
-    fi
+    generate_nginx_conf "$name" "$SVC_TARGET_HOST" "$SVC_TARGET_PORT" "$SVC_TUNNEL_PORT" "$SVC_DOMAIN" "$SVC_EXT_PORT" "$SVC_NDM_AUTH" "$tmp"
 
     scp_cmd "$tmp" "$VPS_USER@$VPS_HOST:$REMOTE_NGINX_DIR/rproxy_$name.conf"
     rm -f "$tmp"
     ssh_cmd "nginx -t && systemctl reload nginx" >/dev/null 2>&1
+
+    # SSL если он был настроен - восстанавливаем слушателей 443
+    if [ "$SVC_SSL" = "yes" ]; then
+        msg "Восстанавливаю SSL через Certbot..."
+        ssh_cmd "certbot --nginx -d $SVC_DOMAIN --non-interactive --agree-tos -m $CERTBOT_EMAIL" >/dev/null 2>&1
+    fi
 
     msg "Настройки обновлены. Перезапускаю туннель..."
     if is_running "$name"; then
