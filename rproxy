@@ -115,7 +115,7 @@ is_running() {
 
 count_services() {
     local count=0
-    for f in "$SERVICES_DIR"/*.conf 2>/dev/null; do
+    for f in "$SERVICES_DIR"/*.conf; do
         [ -f "$f" ] && count=$((count + 1))
     done
     echo $count
@@ -199,7 +199,7 @@ show_status() {
     printf "  ${BOLD}%-4s %-14s %-22s %-7s %-9s %-18s${NC}\n" "№" "ИМЯ" "ЦЕЛЬ" "ПОРТ" "СТАТУС" "ДОМЕН"
     draw_separator
 
-    for f in "$SERVICES_DIR"/*.conf 2>/dev/null; do
+    for f in "$SERVICES_DIR"/*.conf; do
         [ -f "$f" ] || continue
         has_services=1
         idx=$((idx + 1))
@@ -395,7 +395,7 @@ do_remove_interactive() {
 
     local services=""
     local idx=0
-    for f in "$SERVICES_DIR"/*.conf 2>/dev/null; do
+    for f in "$SERVICES_DIR"/*.conf; do
         [ -f "$f" ] || continue
         idx=$((idx + 1))
         . "$f"
@@ -452,7 +452,7 @@ select_service() {
 
     local services=""
     local idx=0
-    for f in "$SERVICES_DIR"/*.conf 2>/dev/null; do
+    for f in "$SERVICES_DIR"/*.conf; do
         [ -f "$f" ] || continue
         . "$f"
 
@@ -533,7 +533,7 @@ do_restart_interactive() {
     select_service "Перезапустить" "all" || { pause; return; }
 
     if [ "$SELECTED_SERVICE" = "__ALL__" ]; then
-        for f in "$SERVICES_DIR"/*.conf 2>/dev/null; do
+        for f in "$SERVICES_DIR"/*.conf; do
             [ -f "$f" ] || continue
             . "$f"
             do_stop_service "$SVC_NAME"
@@ -616,7 +616,7 @@ do_stop_service() {
 }
 
 do_start_all() {
-    for f in "$SERVICES_DIR"/*.conf 2>/dev/null; do
+    for f in "$SERVICES_DIR"/*.conf; do
         [ -f "$f" ] || continue
         . "$f"
         [ "$SVC_ENABLED" = "yes" ] && do_start_service "$SVC_NAME"
@@ -624,7 +624,7 @@ do_start_all() {
 }
 
 do_stop_all() {
-    for f in "$SERVICES_DIR"/*.conf 2>/dev/null; do
+    for f in "$SERVICES_DIR"/*.conf; do
         [ -f "$f" ] || continue
         . "$f"
         do_stop_service "$SVC_NAME"
@@ -682,8 +682,6 @@ do_setup() {
         read -r vps_pass
         stty echo 2>/dev/null
         printf "\n"
-
-        fi
     else
         if [ ! -f "$SSH_KEY" ]; then
             msg "Генерирую SSH-ключ..."
@@ -778,7 +776,7 @@ case "${1:-}" in
     restart)    check_conf && do_stop_all; sleep 1; do_start_all ;;
     status)
         check_conf || { err "VPS не настроен"; exit 1; }
-        for f in "$SERVICES_DIR"/*.conf 2>/dev/null; do
+        for f in "$SERVICES_DIR"/*.conf; do
             [ -f "$f" ] || continue
             . "$f"
             local state="остановлен"
