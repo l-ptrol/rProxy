@@ -3,7 +3,7 @@
 # Публикация локальных сервисов через SSH-туннели + nginx на VPS
 # http://5.104.75.50:3000/Petro1990/rProxy
 
-VERSION="1.3.4"
+VERSION="1.3.5"
 CONF_DIR="/opt/etc/rproxy"
 CONF_FILE="$CONF_DIR/rproxy.conf"
 SERVICES_DIR="$CONF_DIR/services"
@@ -179,9 +179,13 @@ next_free_port() {
 get_router_ip() {
     # Метод 1: Через ndmq (Keenetic Bridge0)
     local ip=$(ndmq -p "show interface Bridge0" -path "address" 2>/dev/null)
+    [ -n "$ip" ] && [ "$ip" != "0.0.0.0" ] && echo "$ip" && return
+
+    # Метод 2: Через маршруты (default gateway)
+    ip=$(ip route show | grep default | awk '{print $3}' | head -n 1)
     [ -n "$ip" ] && echo "$ip" && return
 
-    # Метод 2: Через ip addr (Entware/Keenetic)
+    # Метод 3: Через ip addr (Entware/Keenetic)
     ip=$(ip addr show br0 2>/dev/null | grep 'inet ' | awk '{print $2}' | cut -d/ -f1 | head -n1)
     [ -n "$ip" ] && echo "$ip" && return
 
@@ -197,6 +201,8 @@ enable_router_basic_auth() {
     ndmq -p "ip http auth basic" >/dev/null 2>&1
     # Принудительно задаем realm
     ndmq -p "web-server realm Keenetic" >/dev/null 2>&1
+    # ОЧЕНЬ ВАЖНО: Сохраняем конфигурацию
+    ndmq -p "system configuration save" >/dev/null 2>&1
 }
 
 next_free_ext_port() {
@@ -535,6 +541,10 @@ do_add_interactive() {
         proxy_set_header Origin \"http://$router_ip\";
         proxy_set_header Referer \"http://$router_ip/\";
         proxy_set_header X-NDM-Realm \"Keenetic\";
+        proxy_set_header X-Requested-With XMLHttpRequest;
+
+        # Скрываем заголовки роутера, чтобы они не конфликтовали с нашими
+        proxy_hide_header WWW-Authenticate;
     }
 
     location @auth_required {
