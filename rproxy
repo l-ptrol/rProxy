@@ -3,7 +3,7 @@
 # Публикация локальных сервисов через SSH-туннели + nginx на VPS
 # http://5.104.75.50:3000/Petro1990/rProxy
 
-VERSION="1.3.9"
+VERSION="1.4.0"
 CONF_DIR="/opt/etc/rproxy"
 CONF_FILE="$CONF_DIR/rproxy.conf"
 SERVICES_DIR="$CONF_DIR/services"
@@ -193,7 +193,18 @@ get_router_ip() {
     echo "192.168.1.1"
 }
 
+# Метод 2: Через ndmq (Локальный доступ в Entware)
+# Этот метод не требует пароля и работает мгновенно
+rci_call() {
+    local command="$1"
+    ndmq -p "$command" 2>/dev/null
+}
+
 enable_router_basic_auth() {
+    log_info "Настройка локального доступа через RCI/ndmq..."
+    local hostname=$(rci_call "show system" | grep "hostname" | awk '{print $NF}')
+    log_info "Хостнейм роутера: $hostname"
+}
     # Функция оставлена для обратной совместимости, но более не требуется для v1.3.9
     return 0
 }
