@@ -57,6 +57,7 @@ install_pkg() {
 }
 
 install_pkg "openssh-client"
+install_pkg "openssh-keygen"
 install_pkg "autossh"
 install_pkg "curl"
 

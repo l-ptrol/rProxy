@@ -8,7 +8,7 @@ CONF_DIR="/opt/etc/rproxy"
 CONF_FILE="$CONF_DIR/rproxy.conf"
 SERVICES_DIR="$CONF_DIR/services"
 PID_DIR="/opt/var/run/rproxy"
-SSH_KEY="$CONF_DIR/id_rsa"
+SSH_KEY="$CONF_DIR/id_ed25519"
 REMOTE_NGINX_DIR="/etc/nginx/sites-enabled"
 BASE_TUNNEL_PORT=10000
 
@@ -700,30 +700,27 @@ do_setup() {
         fi
     else
         if [ ! -f "$SSH_KEY" ]; then
-            msg "Генерирую SSH-ключ..."
+            msg "Генерирую SSH-ключ (ed25519)..."
             mkdir -p "$CONF_DIR"
             
-            # Предпочтительно используем полный путь к OpenSSH из Entware
+            # Удаляем старые RSA ключи, если они есть (избегаем путаницы)
+            rm -f "$CONF_DIR/id_rsa" "$CONF_DIR/id_rsa.pub"
+
             local keygen_cmd="/opt/bin/ssh-keygen"
             [ ! -f "$keygen_cmd" ] && keygen_cmd="ssh-keygen"
 
-            # 1. Попытка создания OpenSSH ключа (современный формат)
-            if ! $keygen_cmd -t rsa -b 2048 -f "$SSH_KEY" -N "" -q 2>/dev/null; then
-                # 2. Попытка для Dropbear (флаг -s вместо -b)
-                if ! $keygen_cmd -t rsa -s 2048 -f "$SSH_KEY" -N "" 2>/dev/null; then
-                    # 3. Минимально возможный набор флагов
-                    $keygen_cmd -t rsa -f "$SSH_KEY" -N ""
-                fi
+            # Создаем современный и компактный ed25519 ключ
+            # Он лучше всего совместим между OpenSSH и Dropbear
+            if ! $keygen_cmd -t ed25519 -f "$SSH_KEY" -N "" -q 2>/dev/null; then
+                # Танцы с бубном для старых версий
+                $keygen_cmd -t ed25519 -f "$SSH_KEY" -N ""
             fi
             
-            # Извлекаем публичный ключ, если он не создался (особенности Dropbear)
+            # Извлекаем публичный ключ, если он не создался
             if [ ! -f "$SSH_KEY.pub" ] && [ -f "$SSH_KEY" ]; then
-                # Dropbear -y может выводить лишний текст, берем только строку начинающуюся с ssh-rsa
-                $keygen_cmd -y -f "$SSH_KEY" 2>/dev/null | grep "^ssh-rsa" > "$SSH_KEY.pub"
+                $keygen_cmd -y -f "$SSH_KEY" 2>/dev/null | grep "^ssh-ed25519" > "$SSH_KEY.pub"
             fi
             
-            # Проверка формата: если ключ Dropbear, а клиент OpenSSH — может потребоваться конвертация
-            # Но обычно если мы в Entware, /opt/bin/ssh должен понимать PEM
             if [ -f "$SSH_KEY" ]; then
                 chmod 600 "$SSH_KEY"
                 msg "Ключ создан: $SSH_KEY"
