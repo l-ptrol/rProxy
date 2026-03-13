@@ -3,7 +3,7 @@
 # Публикация локальных сервисов через SSH-туннели + nginx на VPS
 # http://5.104.75.50:3000/Petro1990/rProxy
 
-VERSION="1.2.3"
+VERSION="1.2.4"
 CONF_DIR="/opt/etc/rproxy"
 CONF_FILE="$CONF_DIR/rproxy.conf"
 SERVICES_DIR="$CONF_DIR/services"
@@ -12,6 +12,7 @@ PID_DIR="/opt/var/run/rproxy"
 SSH_KEY="$CONF_DIR/id_ed25519"
 REMOTE_NGINX_DIR="/etc/nginx/sites-enabled"
 BASE_TUNNEL_PORT=10000
+BASE_EXT_PORT=26000
 CERTBOT_EMAIL="" # Будет заполнено из конфига
 
 # ─── Цвета ───────────────────────────────────────────────────────────
@@ -168,7 +169,20 @@ next_free_port() {
         local used=0
         for f in "$SERVICES_DIR"/*.conf; do
             [ -f "$f" ] || continue
-            grep -q "TUNNEL_PORT=$port" "$f" && used=1 && break
+            grep -q "SVC_TUNNEL_PORT=\"$port\"" "$f" && used=1 && break
+        done
+        [ "$used" -eq 0 ] && echo "$port" && return
+        port=$((port + 1))
+    done
+}
+
+next_free_ext_port() {
+    local port=$BASE_EXT_PORT
+    while true; do
+        local used=0
+        for f in "$SERVICES_DIR"/*.conf; do
+            [ -f "$f" ] || continue
+            grep -q "SVC_EXT_PORT=\"$port\"" "$f" && used=1 && break
         done
         [ "$used" -eq 0 ] && echo "$port" && return
         port=$((port + 1))
@@ -354,7 +368,7 @@ select_vps_interactive() {
             . "$f"
             printf "  ${BOLD}%d)${NC}  %s  (${DIM}%s${NC})\n" "$idx" "$(basename "$f" .conf)" "$VPS_HOST"
         )
-        vps_list="$vps_list $(basename "$f" .conf)"
+        [ -z "$vps_list" ] && vps_list="$(basename "$f" .conf)" || vps_list="$vps_list $(basename "$f" .conf)"
     done
     
     draw_separator
@@ -429,7 +443,7 @@ do_add_interactive() {
             warn "Не удалось автоматически определить VPS для $domain"
         fi
     else
-        ext_port=$(next_free_port)
+        ext_port=$(next_free_ext_port)
         prompt "Внешний порт [$ext_port]: "
         ext_port="${REPLY:-$ext_port}"
     fi
@@ -466,9 +480,11 @@ do_add_interactive() {
 
     msg "Добавляю сервис '$name'..."
 
+    # Стелс-режим: прикидываемся локальным запросом
+    local stealth_host="$t_host"
+    [ "$t_port" != "80" ] && stealth_host="$t_host:$t_port"
+
     # Генерация конфига nginx
-    # Host передаём как адрес целевого сервиса, чтобы бэкенд не отклонял запрос
-    # (например, веб-морда роутера проверяет Host и отказывает при несовпадении)
     local tmp="/tmp/rproxy_$name.conf"
     if [ -n "$domain" ]; then
         cat > "$tmp" << NGINXEOF
@@ -489,9 +505,9 @@ server {
         proxy_set_header Connection "upgrade";
         
         # Стелс-режим: прикидываемся локальным запросом
-        proxy_set_header Host "$t_host";
-        proxy_set_header Origin "http://$t_host";
-        proxy_set_header Referer "http://$t_host/";
+        proxy_set_header Host "$stealth_host";
+        proxy_set_header Origin "http://$stealth_host";
+        proxy_set_header Referer "http://$stealth_host/";
         
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
@@ -528,9 +544,9 @@ server {
         proxy_set_header Connection "upgrade";
         
         # Стелс-режим: прикидываемся локальным запросом
-        proxy_set_header Host "$t_host";
-        proxy_set_header Origin "http://$t_host";
-        proxy_set_header Referer "http://$t_host/";
+        proxy_set_header Host "$stealth_host";
+        proxy_set_header Origin "http://$stealth_host";
+        proxy_set_header Referer "http://$stealth_host/";
 
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
