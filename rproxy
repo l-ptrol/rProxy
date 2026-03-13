@@ -3,7 +3,7 @@
 # Публикация локальных сервисов через SSH-туннели + nginx на VPS
 # http://5.104.75.50:3000/Petro1990/rProxy
 
-VERSION="1.0.8"
+VERSION="1.0.9"
 CONF_DIR="/opt/etc/rproxy"
 CONF_FILE="$CONF_DIR/rproxy.conf"
 SERVICES_DIR="$CONF_DIR/services"
@@ -95,6 +95,8 @@ migrate_config() {
     mkdir -p "$VPS_DIR" "$SERVICES_DIR" "$PID_DIR"
     if [ -f "$CONF_FILE" ] && [ ! -f "$VPS_DIR/default.conf" ]; then
         msg "Миграция конфигурации в новый формат..."
+        # Важно: загружаем текущие настройки перед миграцией
+        . "$CONF_FILE"
         # Копируем параметры в профиль default
         cat > "$VPS_DIR/default.conf" <<EOF
 VPS_HOST="$VPS_HOST"
@@ -319,7 +321,6 @@ find_vps_by_domain() {
 }
 
 select_vps_interactive() {
-    clear_screen
     draw_box "Выберите VPS для сервиса"
     printf "\n"
     local vps_list=""
