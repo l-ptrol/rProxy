@@ -3,7 +3,7 @@
 # Публикация локальных сервисов через SSH-туннели + nginx на VPS
 # http://5.104.75.50:3000/Petro1990/rProxy
 
-VERSION="1.4.2"
+VERSION="1.4.3"
 CONF_DIR="/opt/etc/rproxy"
 CONF_FILE="$CONF_DIR/rproxy.conf"
 SERVICES_DIR="$CONF_DIR/services"
@@ -538,8 +538,12 @@ do_add_interactive() {
                 local user="${REPLY:-$def_user}"
                 prompt "Введите пароль для '$user': "
                 local pass="$REPLY"
-                [ -z "$pass" ] && { warn "Пароль не может быть пустым"; pause; return; }
-                htpasswd_line=$(gen_htpasswd "$user" "$pass")
+                if [ -z "$pass" ]; then
+                     warn "Пароль не может быть пустым. Авторизация будет отключена."
+                     use_ndm_auth="no"
+                else
+                     htpasswd_line=$(gen_htpasswd "$user" "$pass")
+                fi
             fi
             ;;
     esac
@@ -1260,13 +1264,13 @@ do_change_auth_defaults() {
 
     [ -z "$pass" ] && { warn "Пароль не может быть пустым"; pause; return; }
 
-    # Сохраняем в конфиг
+    # Безопасное сохранение (одинарные кавычки предотвращают расширение $ внутри пароля)
     sed -i "/DEFAULT_AUTH_USER=/d" "$CONF_FILE"
     sed -i "/DEFAULT_AUTH_PASS=/d" "$CONF_FILE"
-    echo "DEFAULT_AUTH_USER=\"$user\"" >> "$CONF_FILE"
-    echo "DEFAULT_AUTH_PASS=\"$pass\"" >> "$CONF_FILE"
+    printf "DEFAULT_AUTH_USER='%s'\n" "$user" >> "$CONF_FILE"
+    printf "DEFAULT_AUTH_PASS='%s'\n" "$pass" >> "$CONF_FILE"
     
-    msg "Данные успешно сохранены!"
+    msg "Данные успешно сохранены в $CONF_FILE"
     DEFAULT_AUTH_USER="$user"
     DEFAULT_AUTH_PASS="$pass"
     pause
