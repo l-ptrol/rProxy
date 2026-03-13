@@ -3,7 +3,7 @@
 # Публикация локальных сервисов через SSH-туннели + nginx на VPS
 # http://5.104.75.50:3000/Petro1990/rProxy
 
-VERSION="1.5.4"
+VERSION="1.5.5"
 export PATH="/opt/bin:/opt/sbin:$PATH"
 CONF_DIR="/opt/etc/rproxy"
 CONF_FILE="$CONF_DIR/rproxy.conf"
@@ -136,21 +136,23 @@ EOF
 ensure_local_deps() {
     local missing=""
     
+    # Внутренняя функция для надежной проверки
+    _has_cmd() {
+        command -v "$1" >/dev/null 2>&1 || [ -x "/opt/bin/$1" ] || [ -x "/opt/sbin/$1" ]
+    }
+
     # Проверка openssl
-    if ! command -v openssl >/dev/null 2>&1; then
+    if ! _has_cmd openssl; then
         missing="$missing openssl-util"
     fi
     
     # Проверка sshpass
-    if ! command -v sshpass >/dev/null 2>&1; then
-        # Дополнительная проверка через opkg на случай если бинарник не в PATH
-        if ! opkg list-installed sshpass | grep -q sshpass; then
-            missing="$missing sshpass"
-        fi
+    if ! _has_cmd sshpass; then
+        missing="$missing sshpass"
     fi
     
-    # Проверка curl (нужен для обновлений)
-    if ! command -v curl >/dev/null 2>&1; then
+    # Проверка curl
+    if ! _has_cmd curl; then
         missing="$missing curl"
     fi
     
@@ -162,7 +164,6 @@ ensure_local_deps() {
             msg "Установка $pkg..."
             opkg install "$pkg" >/dev/null 2>&1
         done
-        # Даем время системе обновить кеш путей
         hash -r 2>/dev/null
         msg "Все зависимости установлены."
     fi
