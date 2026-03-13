@@ -3,7 +3,7 @@
 # Публикация локальных сервисов через SSH-туннели + nginx на VPS
 # http://5.104.75.50:3000/Petro1990/rProxy
 
-VERSION="1.1.2"
+VERSION="1.1.3"
 CONF_DIR="/opt/etc/rproxy"
 CONF_FILE="$CONF_DIR/rproxy.conf"
 SERVICES_DIR="$CONF_DIR/services"
@@ -318,6 +318,7 @@ show_status() {
 
 find_vps_by_domain() {
     local dom="$1"
+    FOUND_VPS_ID=""
     # Пытаемся получить IP через ping (BusyBox стиль)
     local ip=$(ping -c 1 "$dom" 2>/dev/null | grep -o "[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}" | head -n 1)
     # Если не вышло, пробуем nslookup (парсим более надежно через grep -o)
@@ -330,7 +331,7 @@ find_vps_by_domain() {
         # Используем grep для извлечения IP из конфига (быстрее и надежнее источника)
         local v_host=$(grep "VPS_HOST=" "$f" | cut -d'"' -f2)
         if [ "$v_host" = "$ip" ]; then
-            basename "$f" .conf
+            FOUND_VPS_ID=$(basename "$f" .conf)
             return 0
         fi
     done
@@ -338,6 +339,7 @@ find_vps_by_domain() {
 }
 
 select_vps_interactive() {
+    SELECTED_VPS_ID=""
     draw_box "Выберите VPS для сервиса"
     printf "\n"
     local vps_list=""
@@ -359,12 +361,15 @@ select_vps_interactive() {
     if [ "$REPLY" = "$next_idx" ]; then
         do_add_vps
         # Возвращаем последний созданный (упрощение)
-        ls -t "$VPS_DIR"/*.conf | head -n 1 | xargs basename | sed 's/\.conf//'
+        SELECTED_VPS_ID=$(ls -t "$VPS_DIR"/*.conf | head -n 1 | xargs basename | sed 's/\.conf//')
         return 0
     fi
     
-    local sel=$(echo "$vps_list" | cut -d' ' -f"$REPLY")
-    echo "$sel"
+    # Валидация ввода для cut
+    if echo "$REPLY" | grep -qE '^[0-9]+$'; then
+        SELECTED_VPS_ID=$(echo "$vps_list" | cut -d' ' -f"$REPLY")
+    fi
+    return 0
 }
 
 # ══════════════════════════════════════════════════════════════════════
@@ -411,8 +416,8 @@ do_add_interactive() {
 
         # Автоопределение VPS по домену
         msg "Проверяю куда направлен домен $domain..."
-        vps_id=$(find_vps_by_domain "$domain")
-        if [ -n "$vps_id" ]; then
+        if find_vps_by_domain "$domain"; then
+            vps_id="$FOUND_VPS_ID"
             msg "Домен $domain указывает на ваш VPS '$vps_id'. Выбираю его."
         else
             warn "Не удалось автоматически определить VPS для $domain"
@@ -425,7 +430,8 @@ do_add_interactive() {
 
     # Если VPS не определен автоматически — выбираем вручную
     if [ -z "$vps_id" ]; then
-        vps_id=$(select_vps_interactive)
+        select_vps_interactive
+        vps_id="$SELECTED_VPS_ID"
         [ -z "$vps_id" ] && { warn "VPS не выбран"; pause; return; }
     fi
 
@@ -729,8 +735,12 @@ select_service() {
         return 0
     fi
 
-    # Извлечение имени сервиса по индексу (1-based)
-    SELECTED_SERVICE=$(echo "$services" | cut -d' ' -f"$REPLY")
+    # Извлечение имени сервиса по индексу (1-based) с валидацией
+    if echo "$REPLY" | grep -qE '^[0-9]+$'; then
+        SELECTED_SERVICE=$(echo "$services" | cut -d' ' -f"$REPLY")
+    else
+        SELECTED_SERVICE=""
+    fi
     [ -z "$SELECTED_SERVICE" ] && { warn "Неверный выбор"; return 1; }
     return 0
 }
