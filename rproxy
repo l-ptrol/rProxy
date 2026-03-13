@@ -3,7 +3,7 @@
 # Публикация локальных сервисов через SSH-туннели + nginx на VPS
 # http://5.104.75.50:3000/Petro1990/rProxy
 
-VERSION="1.3.8"
+VERSION="1.3.9"
 CONF_DIR="/opt/etc/rproxy"
 CONF_FILE="$CONF_DIR/rproxy.conf"
 SERVICES_DIR="$CONF_DIR/services"
@@ -194,15 +194,21 @@ get_router_ip() {
 }
 
 enable_router_basic_auth() {
-    msg "Настраиваю роутер на использование Basic Auth для совместимости..."
-    # Для новых версий KeeneticOS
-    ndmq -p "web-server auth basic" >/dev/null 2>&1
-    # Для старых версий или альтернативных API
-    ndmq -p "ip http auth basic" >/dev/null 2>&1
-    # Принудительно задаем realm
-    ndmq -p "web-server realm Keenetic" >/dev/null 2>&1
-    # ОЧЕНЬ ВАЖНО: Сохраняем конфигурацию
-    ndmq -p "system configuration save" >/dev/null 2>&1
+    # Функция оставлена для обратной совместимости, но более не требуется для v1.3.9
+    return 0
+}
+
+gen_htpasswd() {
+    local user="$1"
+    local pass="$2"
+    # Пытаемся использовать openssl если он есть в Entware
+    if command -v openssl >/dev/null 2>&1; then
+        local hash=$(openssl passwd -apr1 "$pass")
+        echo "$user:$hash"
+    else
+        # Запасной вариант если openssl нет (обычный текст, Nginx его понимает)
+        echo "$user:$pass"
+    fi
 }
 
 next_free_ext_port() {
@@ -502,12 +508,18 @@ do_add_interactive() {
     printf "  ${BOLD}Туннель:${NC}       порт $tunnel_port\n"
     [ -n "$domain" ] && printf "  ${BOLD}Домен:${NC}         $domain\n"
     printf "  ${BOLD}Внешний порт:${NC}  $ext_port\n"
-    prompt "Защитить сервис паролем от роутера? (д/н) [н]: "
+    prompt "Защитить сервис паролем? (д/н) [н]: "
     local use_ndm_auth="no"
+    local htpasswd_line=""
     case "$REPLY" in
         д|Д|y|Y|да|yes) 
             use_ndm_auth="yes"
-            enable_router_basic_auth
+            prompt "Введите имя пользователя [admin]: "
+            local user="${REPLY:-admin}"
+            prompt "Введите пароль для '$user' (можно от роутера): "
+            local pass="$REPLY"
+            [ -z "$pass" ] && { warn "Пароль не может быть пустым"; pause; return; }
+            htpasswd_line=$(gen_htpasswd "$user" "$pass")
             ;;
     esac
 
@@ -524,35 +536,10 @@ do_add_interactive() {
 
     # Конфигурация авторизации
     local auth_config=""
-    local router_ip="127.0.0.1"
     if [ "$use_ndm_auth" = "yes" ]; then
-        router_ip=$(get_router_ip)
-        local auth_port=$((tunnel_port + 1))
         auth_config="
-    location /rproxy_auth {
-        internal;
-        proxy_pass http://127.0.0.1:$auth_port/rci/system/hostname;
-        proxy_pass_request_body off;
-        proxy_set_header Content-Length \"\";
-        proxy_set_header Authorization \$http_authorization;
-
-        # Фикс для Keenetic RCI: принудительный 401 вместо 302 редиректа
-        proxy_set_header X-Requested-With XMLHttpRequest;
-        proxy_set_header X-NDM-Auth-Type Basic;
-        proxy_set_header Accept \"application/json\";
-        proxy_set_header Cookie \"\";
-
-        # Стелс-режим для авторизации (используем LAN IP роутера)
-        proxy_set_header Host \"$router_ip\";
-        proxy_set_header Origin \"http://$router_ip\";
-        proxy_set_header Referer \"http://$router_ip/\";
-        proxy_set_header X-NDM-Realm \"Keenetic\";
-    }
-
-    location @auth_required {
-        add_header WWW-Authenticate 'Basic realm=\"Keenetic\"' always;
-        return 401;
-    }
+    auth_basic \"Restricted Access\";
+    auth_basic_user_file /etc/nginx/rproxy_$name.htpasswd;
     "
     fi
 
@@ -563,7 +550,6 @@ do_add_interactive() {
 server {
     listen 80;
     server_name "$domain";
-    recursive_error_pages on;
 
     proxy_buffering off;
     proxy_request_buffering off;
@@ -572,8 +558,7 @@ server {
     proxy_busy_buffers_size 256k;
 
     location / {
-        $( [ "$use_ndm_auth" = "yes" ] && echo "auth_request /rproxy_auth;" )
-        $( [ "$use_ndm_auth" = "yes" ] && echo "error_page 401 403 = @auth_required;" )
+        $auth_config
         proxy_pass http://127.0.0.1:$tunnel_port;
         proxy_http_version 1.1;
         proxy_set_header Upgrade \$http_upgrade;
@@ -606,7 +591,6 @@ NGINXEOF
         cat > "$tmp" << NGINXEOF
 server {
     listen $ext_port;
-    recursive_error_pages on;
 
     proxy_buffering off;
     proxy_request_buffering off;
@@ -615,8 +599,7 @@ server {
     proxy_busy_buffers_size 256k;
 
     location / {
-        $( [ "$use_ndm_auth" = "yes" ] && echo "auth_request /rproxy_auth;" )
-        $( [ "$use_ndm_auth" = "yes" ] && echo "error_page 401 403 = @auth_required;" )
+        $auth_config
         proxy_pass http://127.0.0.1:$tunnel_port;
         proxy_http_version 1.1;
         proxy_set_header Upgrade \$http_upgrade;
@@ -648,6 +631,15 @@ NGINXEOF
     fi
 
     # Деплой
+    # Деплой htpasswd если нужно
+    if [ "$use_ndm_auth" = "yes" ]; then
+        local ht_tmp="/tmp/rproxy_$name.htpasswd"
+        echo "$htpasswd_line" > "$ht_tmp"
+        scp_cmd "$ht_tmp" "$VPS_USER@$VPS_HOST:/etc/nginx/rproxy_$name.htpasswd"
+        rm -f "$ht_tmp"
+    fi
+
+    # Деплой nginx
     scp_cmd "$tmp" "$VPS_USER@$VPS_HOST:$REMOTE_NGINX_DIR/rproxy_$name.conf" || { err "Ошибка деплоя nginx"; rm -f "$tmp"; pause; return; }
     ssh_cmd "nginx -t && systemctl reload nginx" >/dev/null 2>&1
 
@@ -668,7 +660,7 @@ SVC_EXT_PORT="$ext_port"
 SVC_DOMAIN="$domain"
 SVC_SSL="$use_ssl"
 SVC_NDM_AUTH="$use_ndm_auth"
-SVC_ROUTER_IP="$router_ip"
+SVC_HTPASSWD=\"$htpasswd_line\"
 SVC_ENABLED="yes"
 EOF
 
@@ -711,6 +703,10 @@ do_edit_interactive() {
     if is_running "$name"; then
         do_stop_service "$name"
         sleep 1
+        # Обновление htpasswd на VPS если включено
+        if [ "$SVC_NDM_AUTH" = "yes" ]; then
+             ssh_cmd "echo '$SVC_HTPASSWD' > /etc/nginx/rproxy_$name.htpasswd"
+        fi
         do_start_service "$name"
     else
         msg "Сервис был остановлен. Настройки вступят в силу при следующем запуске."
@@ -1099,11 +1095,9 @@ do_start_service() {
 
     msg "Синхронизация с VPS (очистка портов)..."
     ssh_cmd "fuser -k $SVC_TUNNEL_PORT/tcp >/dev/null 2>&1 || true"
-    [ "$SVC_NDM_AUTH" = "yes" ] && ssh_cmd "fuser -k $((SVC_TUNNEL_PORT+1))/tcp >/dev/null 2>&1 || true"
 
     local ssh_opts="-o StrictHostKeyChecking=no -o ServerAliveInterval=10 -o ServerAliveCountMax=3 -o ConnectTimeout=10 -o ExitOnForwardFailure=yes"
     local tunnel_args="-R 0.0.0.0:$SVC_TUNNEL_PORT:$SVC_TARGET_HOST:$SVC_TARGET_PORT"
-    [ "$SVC_NDM_AUTH" = "yes" ] && tunnel_args="$tunnel_args -R 0.0.0.0:$((SVC_TUNNEL_PORT+1)):${SVC_ROUTER_IP:-127.0.0.1}:80"
 
     if [ "$VPS_AUTH" = "password" ]; then
         AUTOSSH_GATETIME=0 sshpass -p "$VPS_PASS" autossh -M 0 -f -N \
