@@ -3,7 +3,7 @@
 # Публикация локальных сервисов через SSH-туннели + nginx на VPS
 # http://5.104.75.50:3000/Petro1990/rProxy
 
-VERSION="1.4.5"
+VERSION="1.4.6"
 CONF_DIR="/opt/etc/rproxy"
 CONF_FILE="$CONF_DIR/rproxy.conf"
 SERVICES_DIR="$CONF_DIR/services"
@@ -55,7 +55,8 @@ pause() {
 
 check_conf() {
     if [ ! -f "$CONF_FILE" ]; then
-        return 1
+        mkdir -p "$CONF_DIR"
+        touch "$CONF_FILE"
     fi
     . "$CONF_FILE"
     # Строгая проверка: ищем хотя бы один файл в vps/, в котором заполнена переменная VPS_HOST
@@ -99,6 +100,7 @@ load_vps() {
 
 migrate_config() {
     mkdir -p "$VPS_DIR" "$SERVICES_DIR" "$PID_DIR"
+    [ ! -f "$CONF_FILE" ] && touch "$CONF_FILE"
     
     # Проверка на "битый" (пустой) конфиг
     local broken=0
