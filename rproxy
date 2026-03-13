@@ -3,7 +3,7 @@
 # Публикация локальных сервисов через SSH-туннели + nginx на VPS
 # http://5.104.75.50:3000/Petro1990/rProxy
 
-VERSION="1.4.8"
+VERSION="1.5.0"
 CONF_DIR="/opt/etc/rproxy"
 CONF_FILE="$CONF_DIR/rproxy.conf"
 SERVICES_DIR="$CONF_DIR/services"
@@ -131,6 +131,36 @@ EOF
     # Если профиль default остался битым и восстановить нечего — удаляем его
     if [ -f "$VPS_DIR/default.conf" ] && ! grep -q "VPS_HOST=" "$VPS_DIR/default.conf"; then
         rm -f "$VPS_DIR/default.conf"
+    fi
+}
+
+ensure_local_deps() {
+    local missing=""
+    
+    # Проверка openssl
+    if ! command -v openssl >/dev/null 2>&1; then
+        missing="$missing openssl-util"
+    fi
+    
+    # Проверка sshpass
+    if ! command -v sshpass >/dev/null 2>&1; then
+        missing="$missing sshpass"
+    fi
+    
+    # Проверка curl (нужен для обновлений)
+    if ! command -v curl >/dev/null 2>&1; then
+        missing="$missing curl"
+    fi
+    
+    if [ -n "$missing" ]; then
+        msg "Обнаружены недостающие зависимости:$missing"
+        msg "Устанавливаю через opkg..."
+        opkg update >/dev/null 2>&1
+        for pkg in $missing; do
+            msg "Установка $pkg..."
+            opkg install "$pkg" >/dev/null 2>&1
+        done
+        msg "Все зависимости установлены."
     fi
 }
 
@@ -1398,6 +1428,7 @@ ensure_ssh_key() {
 # ТОЧКА ВХОДА
 # ══════════════════════════════════════════════════════════════════════
 migrate_config 2>/dev/null
+ensure_local_deps
 
 # Поддержка прямых команд для init-скрипта и автоматизации
 case "${1:-}" in
