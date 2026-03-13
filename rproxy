@@ -78,9 +78,9 @@ ssh_cmd() {
             err "Пожалуйста, перенастройте rProxy на использование SSH-ключа (rproxy setup)."
             return 1
         fi
-        sshpass -p "$VPS_PASS" $ssh_exec -o StrictHostKeyChecking=no -p "$VPS_PORT" "$VPS_USER@$VPS_HOST" "$@"
+        sshpass -p "$VPS_PASS" $ssh_exec -q -o StrictHostKeyChecking=no -o LogLevel=ERROR -p "$VPS_PORT" "$VPS_USER@$VPS_HOST" "$@"
     else
-        $ssh_exec -o StrictHostKeyChecking=no -i "$SSH_KEY" -p "$VPS_PORT" "$@"
+        $ssh_exec -q -o StrictHostKeyChecking=no -o LogLevel=ERROR -i "$SSH_KEY" -p "$VPS_PORT" "$VPS_USER@$VPS_HOST" "$@"
     fi
 }
 
@@ -93,9 +93,9 @@ scp_cmd() {
             err "Утилита sshpass не найдена. Копирование по паролю невозможно."
             return 1
         fi
-        sshpass -p "$VPS_PASS" scp -o StrictHostKeyChecking=no -P "$VPS_PORT" "$@"
+        sshpass -p "$VPS_PASS" $scp_exec -q -o StrictHostKeyChecking=no -o LogLevel=ERROR -P "$VPS_PORT" "$@"
     else
-        scp -o StrictHostKeyChecking=no -i "$SSH_KEY" -P "$VPS_PORT" "$@"
+        $scp_exec -q -o StrictHostKeyChecking=no -o LogLevel=ERROR -i "$SSH_KEY" -P "$VPS_PORT" "$@"
     fi
 }
 
@@ -389,12 +389,16 @@ server {
     rm -f "$tmp_file"
 
     # Проверка и перезагрузка nginx
-    ssh_cmd "nginx -t" >/dev/null 2>&1 || {
-        err "Ошибка в конфигурации nginx на VPS"
+    msg "Проверяю конфигурацию nginx на VPS..."
+    local nginx_test
+    nginx_test=$(ssh_cmd "nginx -t 2>&1")
+    if [ $? -ne 0 ]; then
+        err "Ошибка в конфигурации nginx на VPS:"
+        printf "  ${DIM}%s${NC}\n" "$nginx_test"
         ssh_cmd "rm -f $REMOTE_NGINX_DIR/rproxy_$name.conf"
         pause
         return
-    }
+    fi
     ssh_cmd "systemctl reload nginx" >/dev/null 2>&1
 
     # Получение SSL сертификата если нужно
