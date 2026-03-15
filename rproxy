@@ -3,7 +3,7 @@
 # Публикация локальных сервисов через SSH-туннели + nginx на VPS
 # https://github.com/l-ptrol/rProxy
 
-VERSION="2.0.0-Alpha.8"
+VERSION="2.0.0-Alpha.9"
 export PATH="/opt/bin:/opt/sbin:$PATH"
 CONF_DIR="/opt/etc/rproxy"
 CONF_FILE="$CONF_DIR/rproxy.conf"
@@ -1337,28 +1337,31 @@ start_ttyd() {
         return 1
     fi
 
-    # Переменные окружения терминала
+    # 1️⃣ Расширенные переменные окружения (критично для Keenetic/Entware)
     export TERM=xterm-256color
     export HOME=/root
     export USER=root
     export SHELL=/bin/sh
+    export PATH="/opt/bin:/opt/sbin:/usr/bin:/bin:$PATH"
     export TERMINFO=/opt/share/terminfo
     export LD_LIBRARY_PATH="/opt/lib:/opt/usr/lib:$LD_LIBRARY_PATH"
 
-    # Тщательная очистка порта
+    # 2️⃣ Усиленная очистка порта
     msg "Очистка порта $port..."
     if [ -f "$pid_file" ]; then
         kill "$(cat "$pid_file")" 2>/dev/null
         rm -f "$pid_file"
     fi
     pkill -9 -f "ttyd.*-p $port" >/dev/null 2>&1
-    fuser -k ${port}/tcp >/dev/null 2>&1
-    sleep 1
+    
+    if ss -tln | grep -q ":$port "; then
+        fuser -k ${port}/tcp >/dev/null 2>&1
+        sleep 2
+    fi
 
     msg "Запуск: $ttyd_bin -W -a -i 0.0.0.0 -p $port $cmd"
 
-    # Используем nohup для изоляции процесса и прямой запуск без eval
-    # Перенаправляем stdout и stderr в лог
+    # 3️⃣ Запуск через nohup для изоляции процесса
     nohup $ttyd_bin \
         -W \
         -a \
@@ -1370,19 +1373,20 @@ start_ttyd() {
     local pid=$!
     echo "$pid" > "$pid_file"
 
-    # Даем ttyd время на старт
+    # 4️⃣ Проверка через мониторинг порта (вместо kill -0, так как ttyd может форкаться)
+    msg "Ожидание инициализации порта..."
     sleep 2
 
-    if kill -0 "$pid" 2>/dev/null; then
-        msg "ttyd успешно запущен (PID $pid)"
+    if ss -tln | grep -q ":$port "; then
+        msg "ttyd успешно запущен и слушает порт $port"
         return 0
     else
         err "Ошибка запуска ttyd!"
         if [ -s "$log" ]; then
-            printf "${YELLOW}Лог ttyd:${NC}\n"
-            cat "$log"
+            printf "${YELLOW}Последние строки лога:${NC}\n"
+            tail -n 20 "$log"
         else
-            err "Лог пуст. Попробуйте запустить команду вручную для диагностики."
+            err "Лог пуст. Возможна проблема с правами доступа или бинарником."
         fi
         return 1
     fi
