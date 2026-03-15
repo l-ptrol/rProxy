@@ -3,19 +3,29 @@
 # Публикация локальных сервисов через SSH-туннели + nginx на VPS
 # https://github.com/l-ptrol/rProxy
 
-VERSION="1.9.7-Beta.8"
+VERSION="2.0.0-Alpha.1"
 export PATH="/opt/bin:/opt/sbin:$PATH"
 CONF_DIR="/opt/etc/rproxy"
 CONF_FILE="$CONF_DIR/rproxy.conf"
 SERVICES_DIR="$CONF_DIR/services"
 VPS_DIR="$CONF_DIR/vps"
 PID_DIR="/opt/var/run/rproxy"
+LOCK_DIR="/opt/var/lock/rproxy"
 SSH_KEY="$CONF_DIR/id_ed25519"
 REMOTE_NGINX_DIR="/etc/nginx/sites-enabled"
 REMOTE_NGINX_STREAMS_DIR="/etc/nginx/streams-enabled"
 BASE_TUNNEL_PORT=10000
 BASE_EXT_PORT=26000
+BASE_TTYD_PORT=7681
 CERTBOT_EMAIL="" # Будет заполнено из конфига
+
+next_free_local_port() {
+    local port=$BASE_TTYD_PORT
+    while netstat -tln 2>/dev/null | grep -q ":$port "; do
+        port=$((port + 1))
+    done
+    echo "$port"
+}
 
 # ─── Цвета ───────────────────────────────────────────────────────────
 RED='\033[0;31m'
@@ -85,7 +95,7 @@ load_vps() {
 }
 
 migrate_config() {
-    mkdir -p "$VPS_DIR" "$SERVICES_DIR" "$PID_DIR"
+    mkdir -p "$VPS_DIR" "$SERVICES_DIR" "$PID_DIR" "$LOCK_DIR"
     [ ! -f "$CONF_FILE" ] && touch "$CONF_FILE"
     
     # Проверка на "битый" (пустой) конфиг
@@ -240,7 +250,17 @@ get_pid_file() { echo "$PID_DIR/$1.pid"; }
 is_running() {
     local pf
     pf=$(get_pid_file "$1")
-    [ -f "$pf" ] && kill -0 "$(cat "$pf")" 2>/dev/null
+    if [ -f "$pf" ]; then
+        local pid
+        pid=$(cat "$pf")
+        # Проверяем, существует ли процесс и не является ли он зомби
+        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+            return 0
+        fi
+        # Если PID-файл есть, но процесса нет — удаляем битый файл
+        rm -f "$pf"
+    fi
+    return 1
 }
 
 count_services() {
@@ -742,7 +762,8 @@ do_add_interactive() {
                 scp_cmd "$tmp" "$VPS_USER@$VPS_HOST:$remote_path" || { err "Ошибка деплоя nginx"; rm -f "$tmp"; pause; step=8; continue; }
                 rm -f "$tmp"
                 msg "Перезапуск Nginx на VPS..."
-                ssh_cmd "nginx -t && systemctl reload nginx"
+                ssh_cmd "nginx -t" || { err "Ошибка конфигурации Nginx на VPS!"; return 1; }
+ssh_cmd "systemctl reload nginx"
 
                 if [ "$use_ssl" = "yes" ]; then
                     msg "Проверяю наличие SSL для $domain на VPS..."
@@ -754,7 +775,8 @@ do_add_interactive() {
                             generate_nginx_conf "$name" "$t_host" "$t_port" "$tunnel_port" "$domain" "$ext_port" "$use_ndm_auth" "$tmp" "yes" "$svc_type"
                         fi
                         scp_cmd "$tmp" "$VPS_USER@$VPS_HOST:$remote_path"
-                        ssh_cmd "nginx -t && systemctl reload nginx"
+                        ssh_cmd "nginx -t" || { err "Ошибка конфигурации Nginx на VPS!"; return 1; }
+ssh_cmd "systemctl reload nginx"
                     else
                         msg "Получаю SSL через Certbot (может занять время)..."
                         # Для TCP через домен Certbot должен работать через 80 порт (http-01)
@@ -864,7 +886,8 @@ do_ssl_interactive() {
 
         scp_cmd "$tmp" "$VPS_USER@$VPS_HOST:$remote_path"
         rm -f "$tmp"
-        ssh_cmd "nginx -t && systemctl reload nginx"
+        ssh_cmd "nginx -t" || { err "Ошибка конфигурации Nginx на VPS!"; return 1; }
+ssh_cmd "systemctl reload nginx"
         msg "Nginx обновлен для использования существующего SSL."
         sed -i "s/SVC_SSL=.*/SVC_SSL=\"yes\"/" "$SERVICES_DIR/$name.conf"
     else
@@ -1004,7 +1027,8 @@ do_remove_interactive() {
                 load_service "$name" || exit 1
                 is_running "$name" && do_stop_service "$name"
 
-                ssh_cmd "rm -f $REMOTE_NGINX_DIR/rproxy_$name.conf $REMOTE_NGINX_STREAMS_DIR/rproxy_$name.conf /etc/nginx/rproxy_$name.htpasswd && nginx -t && systemctl reload nginx" >/dev/null 2>&1
+                ssh_cmd "rm -f $REMOTE_NGINX_DIR/rproxy_$name.conf $REMOTE_NGINX_STREAMS_DIR/rproxy_$name.conf /etc/nginx/rproxy_$name.htpasswd"
+                ssh_cmd "nginx -t" && ssh_cmd "systemctl reload nginx"
                 rm -f "$SERVICES_DIR/$name.conf"
                 rm -f "$(get_pid_file "$name")"
             )
@@ -1124,7 +1148,8 @@ do_edit_interactive() {
 
     scp_cmd "$tmp" "$VPS_USER@$VPS_HOST:$remote_path"
     rm -f "$tmp"
-    ssh_cmd "nginx -t && systemctl reload nginx"
+    ssh_cmd "nginx -t" || { err "Ошибка конфигурации Nginx на VPS!"; return 1; }
+ssh_cmd "systemctl reload nginx"
 
     # Обновляем конфиг локально
     sed -i "s/SVC_TARGET_HOST=.*/SVC_TARGET_HOST=\"$new_host\"/" "$SERVICES_DIR/$name.conf"
@@ -1287,9 +1312,23 @@ do_start_service() {
     local name="$1"
     load_service "$name" || return
 
+    local lock_file="$LOCK_DIR/$name.lock"
+    if [ -f "$lock_file" ]; then
+        warn "Сервис '$name' уже запускается (lock-файл существует)."
+        return
+    fi
+    touch "$lock_file"
+    trap 'rm -f "$lock_file"' EXIT
+
+    if is_running "$name"; then
+        msg "Сервис '$name' уже запущен."
+        rm -f "$lock_file"
+        return
+    fi
+
     msg "Запускаю туннель '$name' ($SVC_TARGET_HOST:$SVC_TARGET_PORT → VPS:$SVC_TUNNEL_PORT)..."
 
-    # Если это ttyd - запускаем его локально
+    # Динамический порт для ttyd
     if [ "$SVC_TYPE" = "ttyd" ]; then
         if ! command -v ttyd >/dev/null 2>&1; then
             msg "Установка ttyd на роутер..."
@@ -1297,28 +1336,30 @@ do_start_service() {
         fi
         
         if command -v ttyd >/dev/null 2>&1; then
-            msg "Запускаю ttyd на порту 7681..."
+            local ttyd_port
+            ttyd_port=$(next_free_local_port)
+            msg "Запускаю ttyd на динамическом порту $ttyd_port..."
+            
             local cmd="${SVC_TTYD_CMD:-login}"
             msg "Команда терминала: ${CYAN}$cmd${NC}"
             
-            # Заводим переменные окружения для корректной работы терминала
             export TERMINFO=/opt/share/terminfo
             export TERM=xterm-256color
             export HOME=/root
             export USER=root
             export LD_LIBRARY_PATH="/opt/lib:/opt/usr/lib:$LD_LIBRARY_PATH"
             
-            # Убиваем старые процессы
-            pkill -9 -f "ttyd.*-p 7681" >/dev/null 2>&1
-            fuser -k 7681/tcp >/dev/null 2>&1
-            sleep 1
+            eval "ttyd -W -a -i 0.0.0.0 -p $ttyd_port $cmd" >/tmp/rproxy_ttyd_$name.log 2>&1 &
+            local ttyd_pid=$!
+            echo "$ttyd_pid" > "$PID_DIR/$name.ttyd.pid"
             
-            # -a (Allow Anyone) отключает проверку Origin
-            # Убираем sh -c для прямого запуска команд (фиксит проблемы с PTY)
-            msg "Запуск: ttyd -W -a -i 0.0.0.0 -p 7681 $cmd"
-            eval "ttyd -W -a -i 0.0.0.0 -p 7681 $cmd" >/tmp/rproxy_ttyd.log 2>&1 &
+            # Временно подменяем таргет порт для туннеля
+            SVC_TARGET_PORT=$ttyd_port
+            SVC_TARGET_HOST="127.0.0.1"
         else
-            err "Не удалось установить ttyd. Проверьте интернет или opkg."
+            err "Не удалось установить ttyd."
+            rm -f "$lock_file"
+            return 1
         fi
     fi
 
@@ -1326,24 +1367,27 @@ do_start_service() {
     [ ! -f "$ssh_exec" ] && ssh_exec="ssh"
     export AUTOSSH_PATH="$ssh_exec"
 
-    mkdir -p "$PID_DIR"
-    local pid_file
-    pid_file=$(get_pid_file "$name")
-
-    msg "Синхронизация с VPS (очистка портов)..."
-    ssh_cmd "fuser -k $SVC_TUNNEL_PORT/tcp >/dev/null 2>&1 || true"
+    msg "Проверка порта $SVC_TUNNEL_PORT на VPS..."
+    if ssh_cmd "ss -tln | grep -q ':$SVC_TUNNEL_PORT '"; then
+        warn "Порт $SVC_TUNNEL_PORT на VPS уже занят. Пытаюсь освободить..."
+        ssh_cmd "fuser -k $SVC_TUNNEL_PORT/tcp >/dev/null 2>&1 || true"
+        sleep 1
+    fi
 
     local ssh_opts="-o StrictHostKeyChecking=no -o ServerAliveInterval=10 -o ServerAliveCountMax=3 -o ConnectTimeout=10 -o ExitOnForwardFailure=yes"
     local tunnel_args="-R 0.0.0.0:$SVC_TUNNEL_PORT:$SVC_TARGET_HOST:$SVC_TARGET_PORT"
+    
+    # Мониторинг порт для autossh (20000 + случайное число)
+    local mon_port=$((20000 + RANDOM % 1000))
 
     if [ "$VPS_AUTH" = "password" ]; then
-        AUTOSSH_GATETIME=0 sshpass -p "$VPS_PASS" autossh -M 0 -f -N \
+        AUTOSSH_GATETIME=0 sshpass -p "$VPS_PASS" autossh -M "$mon_port" -f -N \
             $ssh_opts \
             -p "$VPS_PORT" \
             $tunnel_args \
             "$VPS_USER@$VPS_HOST" &
     else
-        AUTOSSH_GATETIME=0 autossh -M 0 -f -N \
+        AUTOSSH_GATETIME=0 autossh -M "$mon_port" -f -N \
             $ssh_opts \
             -i "$SSH_KEY" \
             -p "$VPS_PORT" \
@@ -1352,15 +1396,14 @@ do_start_service() {
     fi
 
     local bg_pid=$!
+    # Трюк для получения реального PID autossh, если он ушел в форк
     sleep 2
-
     local real_pid
-    real_pid=$(pgrep -f "autossh.*$SVC_TUNNEL_PORT:$SVC_TARGET_HOST:$SVC_TARGET_PORT" 2>/dev/null | head -1)
-    [ -z "$real_pid" ] && real_pid=$(pgrep -f "ssh.*$SVC_TUNNEL_PORT:$SVC_TARGET_HOST:$SVC_TARGET_PORT" 2>/dev/null | head -1)
+    real_pid=$(pgrep -f "autossh.*-M $mon_port")
     [ -z "$real_pid" ] && real_pid=$bg_pid
 
-    echo "$real_pid" > "$pid_file"
-    msg "Туннель '$name' запущен (PID: $real_pid)"
+    echo "$real_pid" > "$(get_pid_file "$name")"
+    msg "Туннель '$name' запущен (PID: $real_pid, MonPort: $mon_port)"
 
     # Вывод подсказки для подключения
     if [ "$SVC_TYPE" = "ttyd" ]; then
@@ -1374,58 +1417,66 @@ do_start_service() {
         printf "  ${BOLD}Веб-терминал (ttyd) доступен по адресу:${NC}\n"
         printf "  ${CYAN}$url${NC}\n"
         draw_separator
-    elif [ "$SVC_TYPE" = "tcp" ] || [ "$SVC_TYPE" = "ssh" ]; then
+    elif [ "$SVC_TYPE" = "tcp" ] || [ "$SVC_TYPE" = "ssh" ] || [ "$SVC_TYPE" = "http" ]; then
         draw_separator
-        printf "  ${BOLD}Инструкция по подключению через SSH:${NC}\n"
-        if [ -n "$SVC_DOMAIN" ]; then
-            if [ "$SVC_SSL" = "yes" ]; then
-                printf "  ${DIM}Через ProxyCommand (SSL):${NC}\n"
-                printf "  ssh -o ProxyCommand=\"openssl s_client -quiet -connect $SVC_DOMAIN:$SVC_EXT_PORT\" root@$SVC_TARGET_HOST\n"
-                printf "\n  ${DIM}Для MobaXterm:${NC}\n"
-                printf "  Ssh session -> Network settings -> SSH gateway -> Command:\n"
-                printf "  openssl s_client -quiet -connect $SVC_DOMAIN:$SVC_EXT_PORT\n"
-            else
-                printf "  ssh root@$SVC_DOMAIN -p $SVC_EXT_PORT\n"
-            fi
+        printf "  ${BOLD}Инструкция по подключению:${NC}\n"
+        if [ "$SVC_TYPE" = "tcp" ] || [ "$SVC_TYPE" = "ssh" ]; then
+             if [ -n "$SVC_DOMAIN" ]; then
+                 if [ "$SVC_SSL" = "yes" ]; then
+                     printf "  ${DIM}Через ProxyCommand (SSL):${NC}\n"
+                     printf "  ssh -o ProxyCommand=\"openssl s_client -quiet -connect $SVC_DOMAIN:$SVC_EXT_PORT\" root@$SVC_TARGET_HOST\n"
+                 else
+                     printf "  ssh root@$SVC_DOMAIN -p $SVC_EXT_PORT\n"
+                 fi
+             else
+                 printf "  ssh root@$VPS_HOST -p $SVC_EXT_PORT\n"
+             fi
         else
-            printf "  ssh root@$VPS_HOST -p $SVC_EXT_PORT\n"
+             local proto="http"
+             [ "$SVC_SSL" = "yes" ] && proto="https"
+             local url="$proto://$SVC_DOMAIN"
+             [ "$SVC_EXT_PORT" != "80" ] && [ "$SVC_EXT_PORT" != "443" ] && url="$url:$SVC_EXT_PORT"
+             [ -z "$SVC_DOMAIN" ] && url="$proto://$VPS_HOST:$SVC_EXT_PORT"
+             printf "  Доступен по адресу: ${CYAN}$url${NC}\n"
         fi
         draw_separator
     fi
+
+    rm -f "$lock_file"
 }
 
 do_stop_service() {
     local name="$1"
-    load_service "$name" || return # Загружаем VPS для правильной очистки
+    load_service "$name" || return
+    
     local pid_file
     pid_file=$(get_pid_file "$name")
 
-    if [ ! -f "$pid_file" ]; then
-        warn "Сервис '$name' не запущен"
-        return
+    # Сначала проверяем туннель
+    if [ -f "$pid_file" ]; then
+        local pid
+        pid=$(cat "$pid_file")
+        msg "Остановка туннеля '$name' (PID: $pid)..."
+        kill "$pid" 2>/dev/null
+        # Если туннель не умер — форсируем
+        sleep 1
+        kill -9 "$pid" 2>/dev/null
+        rm -f "$pid_file"
+    else
+        warn "PID-файл туннеля '$name' не найден"
     fi
 
-    local pid
-    pid=$(cat "$pid_file")
-    kill "$pid" 2>/dev/null
-    pkill -f "ssh.*:$SVC_TUNNEL_PORT:.*$VPS_HOST" 2>/dev/null
-
-    rm -f "$pid_file"
-    msg "Туннель '$name' остановлен"
-
-    # Если это был терминал и больше нет активных туннелей терминала - тушим ttyd
-    if [ "$SVC_TYPE" = "ttyd" ]; then
-        local active_ttyd=0
-        for f in "$SERVICES_DIR"/*.conf; do
-            [ -f "$f" ] || continue
-            (
-                . "$f"
-                [ "$SVC_TYPE" = "ttyd" ] && is_running "$SVC_NAME" && exit 0
-                exit 1
-            ) && active_ttyd=$((active_ttyd + 1))
-        done
-        [ "$active_ttyd" -eq 0 ] && pkill -x ttyd 2>/dev/null
+    # Теперь ttyd если был
+    local ttyd_pid_file="$PID_DIR/$name.ttyd.pid"
+    if [ -f "$ttyd_pid_file" ]; then
+        local tpid
+        tpid=$(cat "$ttyd_pid_file")
+        msg "Остановка ttyd (PID: $tpid)..."
+        kill "$tpid" 2>/dev/null
+        rm -f "$ttyd_pid_file"
     fi
+
+    msg "Сервис '$name' остановлен"
 }
 
 _clear_svc_vars() {
