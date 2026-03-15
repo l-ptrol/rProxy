@@ -3,7 +3,7 @@
 # Публикация локальных сервисов через SSH-туннели + nginx на VPS
 # https://github.com/l-ptrol/rProxy
 
-VERSION="1.6.8"
+VERSION="1.6.9"
 export PATH="/opt/bin:/opt/sbin:$PATH"
 CONF_DIR="/opt/etc/rproxy"
 CONF_FILE="$CONF_DIR/rproxy.conf"
@@ -736,23 +736,42 @@ do_self_update() {
     clear_screen
     draw_box "Обновление rProxy"
     printf "\n"
-    msg "Проверяю наличие обновлений..."
     
-    local url="https://raw.githubusercontent.com/l-ptrol/rProxy/main/rproxy"
+    printf "  Выберите ветку для обновления:\n"
+    printf "  ${BOLD}1)${NC}  Основная (стабильная)\n"
+    printf "  ${BOLD}2)${NC}  Тестовая (Custom Ports Beta)\n"
+    printf "  ${BOLD}0)${NC}  Отмена\n"
+    draw_separator
+    
+    prompt "Ваш выбор: "
+    local branch="main"
+    case "$REPLY" in
+        1) branch="main" ;;
+        2) 
+            branch="test-custom-ports"
+            warn "Вы выбрали тестовую ветку. Она может содержать ошибки!"
+            ;;
+        0) return ;;
+        *) warn "Неверный выбор"; pause; return ;;
+    esac
+
+    msg "Проверяю наличие обновлений из ветки '$branch'..."
+    
+    local url="https://raw.githubusercontent.com/l-ptrol/rProxy/$branch/rproxy"
     local tmp_file="/tmp/rproxy_update"
     
     if curl -sSL "$url" -o "$tmp_file"; then
         if [ -s "$tmp_file" ]; then
              mv "$tmp_file" "/opt/bin/rproxy"
              chmod +x "/opt/bin/rproxy"
-             msg "Обновление успешно завершено!"
+             msg "Обновление из ветки '$branch' успешно завершено!"
              pause
              exec /opt/bin/rproxy # Перезапуск новой версии
         else
-             err "Файл обновления не пуст или не найден"
+             err "Файл обновления пуст или не найден в ветке '$branch'"
         fi
     else
-        err "Не удалось загрузить обновление"
+        err "Не удалось загрузить обновление из ветки '$branch'"
     fi
     pause
 }
