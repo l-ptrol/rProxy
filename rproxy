@@ -3,7 +3,7 @@
 # Публикация локальных сервисов через SSH-туннели + nginx на VPS
 # https://github.com/l-ptrol/rProxy
 
-VERSION="2.0.0-Alpha.1"
+VERSION="2.0.0-Alpha.2"
 export PATH="/opt/bin:/opt/sbin:$PATH"
 CONF_DIR="/opt/etc/rproxy"
 CONF_FILE="$CONF_DIR/rproxy.conf"
@@ -1308,6 +1308,89 @@ do_restart_interactive() {
 # ══════════════════════════════════════════════════════════════════════
 # ЗАПУСК / ОСТАНОВ (одного сервиса)
 # ══════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════
+# УПРАВЛЕНИЕ TTYD
+# ══════════════════════════════════════════════════════════════════════
+start_ttyd() {
+    local port="${1:-7681}"
+    local cmd="${SVC_TTYD_CMD:-login}"
+    local log="/tmp/rproxy_ttyd_${port}.log"
+    local pid_file="/opt/var/run/rproxy/ttyd_${port}.pid"
+
+    msg "Запуск ttyd терминала..."
+    msg "Порт: $port"
+    msg "Команда: $cmd"
+
+    # Проверяем установлен ли ttyd
+    if ! command -v ttyd >/dev/null 2>&1; then
+        msg "Установка ttyd..."
+        opkg update >/dev/null 2>&1
+        opkg install ttyd >/dev/null 2>&1
+    fi
+
+    if ! command -v ttyd >/dev/null 2>&1; then
+        err "ttyd не установлен"
+        return 1
+    fi
+
+    # Переменные окружения терминала
+    export TERM=xterm-256color
+    export HOME=/root
+    export USER=root
+    export SHELL=/bin/sh
+    export TERMINFO=/opt/share/terminfo
+    export LD_LIBRARY_PATH="/opt/lib:/opt/usr/lib:$LD_LIBRARY_PATH"
+
+    # Останавливаем старый ttyd только на этом порту
+    if [ -f "$pid_file" ]; then
+        kill "$(cat "$pid_file")" 2>/dev/null
+        rm -f "$pid_file"
+    fi
+
+    # страховка
+    fuser -k ${port}/tcp >/dev/null 2>&1
+    sleep 1
+
+    msg "Запуск ttyd..."
+
+    ttyd \
+        -W \
+        -a \
+        --check-origin=false \
+        --once=false \
+        -i 0.0.0.0 \
+        -p "$port" \
+        -- sh -c "$cmd" \
+        > "$log" 2>&1 &
+
+    local pid=$!
+    echo "$pid" > "$pid_file"
+
+    sleep 1
+
+    if kill -0 "$pid" 2>/dev/null; then
+        msg "ttyd успешно запущен (PID $pid)"
+        return 0
+    else
+        err "Ошибка запуска ttyd"
+        cat "$log"
+        return 1
+    fi
+}
+
+stop_ttyd() {
+    local port="${1:-7681}"
+    local pid_file="/opt/var/run/rproxy/ttyd_${port}.pid"
+
+    if [ -f "$pid_file" ]; then
+        kill "$(cat "$pid_file")" 2>/dev/null
+        rm -f "$pid_file"
+        msg "ttyd остановлен (порт $port)"
+    fi
+
+    fuser -k ${port}/tcp >/dev/null 2>&1
+}
+
 do_start_service() {
     local name="$1"
     load_service "$name" || return
@@ -1330,34 +1413,11 @@ do_start_service() {
 
     # Динамический порт для ttyd
     if [ "$SVC_TYPE" = "ttyd" ]; then
-        if ! command -v ttyd >/dev/null 2>&1; then
-            msg "Установка ttyd на роутер..."
-            opkg update >/dev/null 2>&1 && opkg install ttyd >/dev/null 2>&1
-        fi
-        
-        if command -v ttyd >/dev/null 2>&1; then
-            local ttyd_port
-            ttyd_port=$(next_free_local_port)
-            msg "Запускаю ttyd на динамическом порту $ttyd_port..."
-            
-            local cmd="${SVC_TTYD_CMD:-login}"
-            msg "Команда терминала: ${CYAN}$cmd${NC}"
-            
-            export TERMINFO=/opt/share/terminfo
-            export TERM=xterm-256color
-            export HOME=/root
-            export USER=root
-            export LD_LIBRARY_PATH="/opt/lib:/opt/usr/lib:$LD_LIBRARY_PATH"
-            
-            eval "ttyd -W -a -i 0.0.0.0 -p $ttyd_port $cmd" >/tmp/rproxy_ttyd_$name.log 2>&1 &
-            local ttyd_pid=$!
-            echo "$ttyd_pid" > "$PID_DIR/$name.ttyd.pid"
-            
-            # Временно подменяем таргет порт для туннеля
-            SVC_TARGET_PORT=$ttyd_port
+        if start_ttyd; then
+            # По умолчанию пользователь использует 7681
+            SVC_TARGET_PORT=7681
             SVC_TARGET_HOST="127.0.0.1"
         else
-            err "Не удалось установить ttyd."
             rm -f "$lock_file"
             return 1
         fi
@@ -1467,13 +1527,8 @@ do_stop_service() {
     fi
 
     # Теперь ttyd если был
-    local ttyd_pid_file="$PID_DIR/$name.ttyd.pid"
-    if [ -f "$ttyd_pid_file" ]; then
-        local tpid
-        tpid=$(cat "$ttyd_pid_file")
-        msg "Остановка ttyd (PID: $tpid)..."
-        kill "$tpid" 2>/dev/null
-        rm -f "$ttyd_pid_file"
+    if [ "$SVC_TYPE" = "ttyd" ]; then
+        stop_ttyd
     fi
 
     msg "Сервис '$name' остановлен"
