@@ -3,7 +3,7 @@
 # Публикация локальных сервисов через SSH-туннели + nginx на VPS
 # https://github.com/l-ptrol/rProxy
 
-VERSION="1.7.1-Beta"
+VERSION="1.8.0-Beta"
 export PATH="/opt/bin:/opt/sbin:$PATH"
 CONF_DIR="/opt/etc/rproxy"
 CONF_FILE="$CONF_DIR/rproxy.conf"
@@ -12,6 +12,7 @@ VPS_DIR="$CONF_DIR/vps"
 PID_DIR="/opt/var/run/rproxy"
 SSH_KEY="$CONF_DIR/id_ed25519"
 REMOTE_NGINX_DIR="/etc/nginx/sites-enabled"
+REMOTE_NGINX_STREAMS_DIR="/etc/nginx/streams-enabled"
 BASE_TUNNEL_PORT=10000
 BASE_EXT_PORT=26000
 CERTBOT_EMAIL="" # Будет заполнено из конфига
@@ -449,6 +450,7 @@ do_add_interactive() {
     local step=1
     local name="" target="" mode="" domain="" ext_port="" use_ssl="no" vps_id="" 
     local use_ndm_auth="no" htpasswd_line=""
+    local svc_type="http" # http, tcp, ttyd
 
     while [ "$step" -gt 0 ]; do
         clear_screen
@@ -478,24 +480,45 @@ do_add_interactive() {
                 if [ -z "$target" ]; then
                     warn "Адрес не может быть пустым."
                     pause
-                else
-                    step=3
+                    continue
                 fi
+                
+                # Шаг 2.5: Тип сервиса
+                printf "\n  ${BOLD}Тип сервиса:${NC}\n"
+                printf "  ${BOLD}1)${NC} Веб (HTTP) — сайты, панели управления\n"
+                printf "  ${BOLD}2)${NC} Порт (TCP) — SSH (22), БД, сырой трафик\n"
+                printf "  ${BOLD}3)${NC} Терминал (ttyd) — доступ к консоли через браузер\n"
+                prompt "Выберите [1]: "
+                [ "$REPLY" = "0" ] && { step=1; continue; }
+                case "${REPLY:-1}" in
+                    1) svc_type="http" ;;
+                    2) svc_type="tcp" ;;
+                    3) 
+                        svc_type="ttyd"
+                        target="127.0.0.1:7681" # Дефолтный порт ttyd
+                        msg "Будет использован встроенный ttyd (порт 7681)"
+                        sleep 1
+                        ;;
+                    *) warn "Неверный выбор"; pause; continue ;;
+                esac
+                step=3
                 ;;
             3)
                 printf "  Название: ${CYAN}%s${NC}\n" "$name"
-                printf "  Цель:     ${CYAN}%s${NC}\n\n" "$target"
-                printf "  Привязать к домену?\n"
-                printf "  ${BOLD}1)${NC} Да — указать доменное имя (порт 443)\n"
-                printf "  ${BOLD}2)${NC} Нет — указать внешний порт\n"
-                prompt "Выберите [2]: "
-                [ "$REPLY" = "0" ] && { step=2; continue; }
-                mode="${REPLY:-2}"
-                if [ "$mode" = "1" ] || [ "$mode" = "2" ]; then
+                printf "  Цель:     ${CYAN}%s${NC}\n" "$target"
+                printf "  Тип:      ${CYAN}%s${NC}\n\n" "$svc_type"
+                
+                if [ "$svc_type" = "tcp" ]; then
+                    mode="2" # Только порты для TCP
                     step=4
                 else
-                    warn "Неверный выбор."
-                    pause
+                    printf "  Привязать к домену?\n"
+                    printf "  ${BOLD}1)${NC} Да — указать доменное имя (порт 443)\n"
+                    printf "  ${BOLD}2)${NC} Нет — указать внешний порт\n"
+                    prompt "Выберите [2]: "
+                    [ "$REPLY" = "0" ] && { step=2; continue; }
+                    mode="${REPLY:-2}"
+                    step=4
                 fi
                 ;;
             4)
@@ -629,6 +652,7 @@ do_add_interactive() {
                 printf "  ${BOLD}Туннель:${NC}       порт $tunnel_port\n"
                 [ -n "$domain" ] && printf "  ${BOLD}Домен:${NC}         $domain\n"
                 printf "  ${BOLD}Внешний порт:${NC}  $ext_port\n"
+                printf "  ${BOLD}Тип прокси:${NC}    $svc_type\n"
                 printf "  ${BOLD}Авторизация:${NC}   $use_ndm_auth\n"
                 draw_separator
 
@@ -679,6 +703,7 @@ do_add_interactive() {
                     printf 'SVC_SSL="%s"\n' "$use_ssl"
                     printf 'SVC_NDM_AUTH="%s"\n' "$use_ndm_auth"
                     printf "SVC_HTPASSWD='%s'\n" "$htpasswd_line"
+                    printf 'SVC_TYPE="%s"\n' "$svc_type"
                     printf 'SVC_ENABLED="yes"\n'
                 } > "$SERVICES_DIR/$name.conf"
 
@@ -1150,15 +1175,25 @@ do_restart_interactive() {
 # ЗАПУСК / ОСТАНОВ (одного сервиса)
 # ══════════════════════════════════════════════════════════════════════
 do_start_service() {
-    local name="$1"
-    load_service "$name" || return
-
-    if is_running "$name"; then
-        warn "Сервис '$name' уже запущен"
-        return
-    fi
-
     msg "Запускаю туннель '$name' ($SVC_TARGET_HOST:$SVC_TARGET_PORT → VPS:$SVC_TUNNEL_PORT)..."
+
+    # Если это ttyd - запускаем его локально
+    if [ "$SVC_TYPE" = "ttyd" ]; then
+        if ! command -v ttyd >/dev/null 2>&1; then
+            msg "Установка ttyd на роутер..."
+            opkg update >/dev/null 2>&1 && opkg install ttyd >/dev/null 2>&1
+        fi
+        
+        if command -v ttyd >/dev/null 2>&1; then
+            msg "Запускаю ttyd на порту 7681..."
+            # Запускаем ttyd в фоне, если еще не запущен
+            if ! pgrep -x ttyd >/dev/null 2>&1; then
+                ttyd -p 7681 login >/dev/null 2>&1 &
+            fi
+        else
+            err "Не удалось установить ttyd. Проверьте интернет или opkg."
+        fi
+    fi
 
     local ssh_exec="/opt/bin/ssh"
     [ ! -f "$ssh_exec" ] && ssh_exec="ssh"
@@ -1219,11 +1254,25 @@ do_stop_service() {
 
     rm -f "$pid_file"
     msg "Туннель '$name' остановлен"
+
+    # Если это был терминал и больше нет активных туннелей терминала - тушим ttyd
+    if [ "$SVC_TYPE" = "ttyd" ]; then
+        local active_ttyd=0
+        for f in "$SERVICES_DIR"/*.conf; do
+            [ -f "$f" ] || continue
+            (
+                . "$f"
+                [ "$SVC_TYPE" = "ttyd" ] && is_running "$SVC_NAME" && exit 0
+                exit 1
+            ) && active_ttyd=$((active_ttyd + 1))
+        done
+        [ "$active_ttyd" -eq 0 ] && pkill -x ttyd 2>/dev/null
+    fi
 }
 
 _clear_svc_vars() {
     unset SVC_NAME SVC_VPS SVC_TARGET_HOST SVC_TARGET_PORT SVC_TUNNEL_PORT
-    unset SVC_EXT_PORT SVC_DOMAIN SVC_SSL SVC_NDM_AUTH SVC_HTPASSWD SVC_ENABLED
+    unset SVC_EXT_PORT SVC_DOMAIN SVC_SSL SVC_NDM_AUTH SVC_HTPASSWD SVC_TYPE SVC_ENABLED
 }
 
 load_service() {
@@ -1240,6 +1289,20 @@ check_remote_ssl() {
     ssh_cmd "[ -d /etc/letsencrypt/live/$domain ]" >/dev/null 2>&1
 }
 
+generate_nginx_stream_conf() {
+    local name="$1"
+    local tunnel_port="$2"
+    local ext_port="$3"
+    local target_file="$4"
+
+    cat > "$target_file" << NGINXEOF
+server {
+    listen $ext_port;
+    proxy_pass 127.0.0.1:$tunnel_port;
+}
+NGINXEOF
+}
+
 generate_nginx_conf() {
     local name="$1"
     local t_host="$2"
@@ -1249,6 +1312,7 @@ generate_nginx_conf() {
     local ext_port="$6"
     local use_ndm_auth="$7"
     local target_file="$8"
+    local type="${9:-http}"
 
     # Загружаем SSL статус
     local use_ssl="no"
@@ -1611,12 +1675,19 @@ EOF
         mkdir -p /etc/nginx/sites-enabled
         grep -q 'sites-enabled' /etc/nginx/nginx.conf || sed -i '/http {/a\    include /etc/nginx/sites-enabled/*.conf;' /etc/nginx/nginx.conf
         command -v certbot >/dev/null 2>&1 || (apt-get update -qq && apt-get install -y -qq certbot python3-certbot-nginx || yum install -y certbot python3-certbot-nginx)
+        # Настройка Nginx Stream
+        mkdir -p /etc/nginx/streams-enabled
+        if ! grep -q 'streams-enabled' /etc/nginx/nginx.conf; then
+            # Добавляем блок stream в конец файла, если его нет
+            if grep -q 'stream {' /etc/nginx/nginx.conf; then
+                 # Блок есть, но без нашего инклуда - добавим внутрь (сложно седом, просто в конец)
+                 echo "include /etc/nginx/streams-enabled/*.conf;" >> /etc/nginx/nginx.conf
+            else
+                 printf "\nstream {\n    include /etc/nginx/streams-enabled/*.conf;\n}\n" >> /etc/nginx/nginx.conf
+            fi
+        fi
+
         systemctl enable nginx && systemctl start nginx
-        
-        # Оптимизация SSH на стороне сервера для туннелей
-        grep -q 'ClientAliveInterval' /etc/ssh/sshd_config || echo 'ClientAliveInterval 30' >> /etc/ssh/sshd_config
-        grep -q 'ClientAliveCountMax' /etc/ssh/sshd_config || echo 'ClientAliveCountMax 2' >> /etc/ssh/sshd_config
-        systemctl restart ssh
     "
     pause
 }
