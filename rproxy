@@ -3,7 +3,7 @@
 # Публикация локальных сервисов через SSH-туннели + nginx на VPS
 # https://github.com/l-ptrol/rProxy
 
-VERSION="1.8.6-Beta"
+VERSION="1.8.7-Beta"
 export PATH="/opt/bin:/opt/sbin:$PATH"
 CONF_DIR="/opt/etc/rproxy"
 CONF_FILE="$CONF_DIR/rproxy.conf"
@@ -666,6 +666,17 @@ do_add_interactive() {
                 if [ "$svc_type" = "tcp" ]; then
                     generate_nginx_stream_conf "$name" "$tunnel_port" "$ext_port" "$tmp" "$domain"
                     remote_path="$REMOTE_NGINX_STREAMS_DIR/rproxy_$name.conf"
+                    # Гарантируем наличие директории и инклуда в nginx.conf
+                    ssh_cmd "
+                        mkdir -p $REMOTE_NGINX_STREAMS_DIR
+                        if ! grep -q 'streams-enabled' /etc/nginx/nginx.conf; then
+                            if grep -q 'stream {' /etc/nginx/nginx.conf; then
+                                echo 'include $REMOTE_NGINX_STREAMS_DIR/*.conf;' >> /etc/nginx/nginx.conf
+                            else
+                                printf '\nstream {\n    include $REMOTE_NGINX_STREAMS_DIR/*.conf;\n}\n' >> /etc/nginx/nginx.conf
+                            fi
+                        fi
+                    " >/dev/null 2>&1
                 else
                     generate_nginx_conf "$name" "$t_host" "$t_port" "$tunnel_port" "$domain" "$ext_port" "$use_ndm_auth" "$tmp" "$svc_type"
                 fi
