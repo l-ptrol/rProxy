@@ -3,7 +3,7 @@
 # Публикация локальных сервисов через SSH-туннели + nginx на VPS
 # https://github.com/l-ptrol/rProxy
 
-VERSION="2.0.0-Alpha.2"
+VERSION="2.0.0-Alpha.3"
 export PATH="/opt/bin:/opt/sbin:$PATH"
 CONF_DIR="/opt/etc/rproxy"
 CONF_FILE="$CONF_DIR/rproxy.conf"
@@ -1342,12 +1342,12 @@ start_ttyd() {
     export LD_LIBRARY_PATH="/opt/lib:/opt/usr/lib:$LD_LIBRARY_PATH"
 
     # Останавливаем старый ttyd только на этом порту
+    msg "Очистка порта $port..."
     if [ -f "$pid_file" ]; then
         kill "$(cat "$pid_file")" 2>/dev/null
         rm -f "$pid_file"
     fi
-
-    # страховка
+    pkill -9 -f "ttyd.*-p $port" >/dev/null 2>&1
     fuser -k ${port}/tcp >/dev/null 2>&1
     sleep 1
 
@@ -1387,7 +1387,7 @@ stop_ttyd() {
         rm -f "$pid_file"
         msg "ttyd остановлен (порт $port)"
     fi
-
+    pkill -9 -f "ttyd.*-p $port" >/dev/null 2>&1
     fuser -k ${port}/tcp >/dev/null 2>&1
 }
 
