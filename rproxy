@@ -3,7 +3,7 @@
 # Публикация локальных сервисов через SSH-туннели + nginx на VPS
 # https://github.com/l-ptrol/rProxy
 
-VERSION="2.0.0-Alpha.7"
+VERSION="2.0.0-Alpha.8"
 export PATH="/opt/bin:/opt/sbin:$PATH"
 CONF_DIR="/opt/etc/rproxy"
 CONF_FILE="$CONF_DIR/rproxy.conf"
@@ -1319,20 +1319,21 @@ start_ttyd() {
     local cmd="${SVC_TTYD_CMD:-login}"
     local log="/tmp/rproxy_ttyd_${port}.log"
     local pid_file="/opt/var/run/rproxy/ttyd_${port}.pid"
+    local ttyd_bin="/opt/bin/ttyd"
 
     msg "Запуск ttyd терминала..."
     msg "Порт: $port"
     msg "Команда: $cmd"
 
-    # Проверяем установлен ли ttyd
-    if ! command -v ttyd >/dev/null 2>&1; then
-        msg "Установка ttyd..."
+    # Проверяем наличие бинарника
+    if [ ! -x "$ttyd_bin" ]; then
+        msg "Установка ttyd через opkg..."
         opkg update >/dev/null 2>&1
         opkg install ttyd >/dev/null 2>&1
     fi
 
-    if ! command -v ttyd >/dev/null 2>&1; then
-        err "ttyd не установлен"
+    if [ ! -x "$ttyd_bin" ]; then
+        err "ttyd не найден по пути $ttyd_bin. Пожалуйста, установите его вручную: opkg install ttyd"
         return 1
     fi
 
@@ -1344,7 +1345,7 @@ start_ttyd() {
     export TERMINFO=/opt/share/terminfo
     export LD_LIBRARY_PATH="/opt/lib:/opt/usr/lib:$LD_LIBRARY_PATH"
 
-    # Останавливаем старый ttyd только на этом порту
+    # Тщательная очистка порта
     msg "Очистка порта $port..."
     if [ -f "$pid_file" ]; then
         kill "$(cat "$pid_file")" 2>/dev/null
@@ -1354,14 +1355,22 @@ start_ttyd() {
     fuser -k ${port}/tcp >/dev/null 2>&1
     sleep 1
 
-    msg "Запуск: ttyd -W -a -i 0.0.0.0 -p $port $cmd"
+    msg "Запуск: $ttyd_bin -W -a -i 0.0.0.0 -p $port $cmd"
 
-    # Используем eval для максимально точного соответствия терминальному вводу
-    eval "ttyd -W -a -i 0.0.0.0 -p $port $cmd >> \"$log\" 2>&1 &"
+    # Используем nohup для изоляции процесса и прямой запуск без eval
+    # Перенаправляем stdout и stderr в лог
+    nohup $ttyd_bin \
+        -W \
+        -a \
+        -i 0.0.0.0 \
+        -p "$port" \
+        $cmd \
+        > "$log" 2>&1 &
+
     local pid=$!
     echo "$pid" > "$pid_file"
 
-    # Даем ttyd чуть больше времени на инициализацию
+    # Даем ttyd время на старт
     sleep 2
 
     if kill -0 "$pid" 2>/dev/null; then
@@ -1370,10 +1379,10 @@ start_ttyd() {
     else
         err "Ошибка запуска ttyd!"
         if [ -s "$log" ]; then
-            printf "${YELLOW}Содержимое лога:${NC}\n"
+            printf "${YELLOW}Лог ttyd:${NC}\n"
             cat "$log"
         else
-            err "Лог пуст. Возможно, ttyd не найден или аргументы неверны."
+            err "Лог пуст. Попробуйте запустить команду вручную для диагностики."
         fi
         return 1
     fi
