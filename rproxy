@@ -3,7 +3,7 @@
 # Публикация локальных сервисов через SSH-туннели + nginx на VPS
 # https://github.com/l-ptrol/rProxy
 
-VERSION="1.9.7-Beta.6"
+VERSION="1.9.7-Beta.7"
 export PATH="/opt/bin:/opt/sbin:$PATH"
 CONF_DIR="/opt/etc/rproxy"
 CONF_FILE="$CONF_DIR/rproxy.conf"
@@ -751,7 +751,8 @@ do_add_interactive() {
                         if [ "$svc_type" = "tcp" ]; then
                             generate_nginx_stream_conf "$name" "$tunnel_port" "$ext_port" "$tmp" "$domain"
                         else
-                        generate_nginx_conf "$name" "$t_host" "$t_port" "$tunnel_port" "$domain" "$ext_port" "$use_ndm_auth" "$tmp" "yes" "$svc_type"
+                            generate_nginx_conf "$name" "$t_host" "$t_port" "$tunnel_port" "$domain" "$ext_port" "$use_ndm_auth" "$tmp" "yes" "$svc_type"
+                        fi
                         scp_cmd "$tmp" "$VPS_USER@$VPS_HOST:$remote_path"
                         ssh_cmd "nginx -t && systemctl reload nginx"
                     else
