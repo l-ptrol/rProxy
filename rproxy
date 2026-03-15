@@ -3,7 +3,7 @@
 # Публикация локальных сервисов через SSH-туннели + nginx на VPS
 # https://github.com/l-ptrol/rProxy
 
-VERSION="2.0.0-Alpha.10"
+VERSION="2.0.0-Alpha.11"
 export PATH="/opt/bin:/opt/sbin:$PATH"
 CONF_DIR="/opt/etc/rproxy"
 CONF_FILE="$CONF_DIR/rproxy.conf"
@@ -1401,8 +1401,6 @@ stop_ttyd() {
     fi
     pkill -9 -f "ttyd.*-p $port" >/dev/null 2>&1
     fuser -k ${port}/tcp >/dev/null 2>&1
-}
-
 }
 
 do_start_service() {
