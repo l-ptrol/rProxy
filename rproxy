@@ -3,7 +3,7 @@
 # Публикация локальных сервисов через SSH-туннели + nginx на VPS
 # https://github.com/l-ptrol/rProxy
 
-VERSION="1.6.7"
+VERSION="1.6.8"
 export PATH="/opt/bin:/opt/sbin:$PATH"
 CONF_DIR="/opt/etc/rproxy"
 CONF_FILE="$CONF_DIR/rproxy.conf"
@@ -875,52 +875,55 @@ do_remove_interactive() {
 # РЕДАКТИРОВАТЬ СЕРВИС (интерактивно)
 # ══════════════════════════════════════════════════════════════════════
 do_edit_interactive() {
-    clear_screen
-    draw_box "Редактировать сервис"
-    printf "\n"
+    while true; do
+        clear_screen
+        draw_box "Редактировать сервис"
+        printf "\n"
 
-    select_service "Выберите сервис для редактирования" "all" || { pause; return; }
-    local name="$SELECTED_SERVICE"
-    [ "$name" = "__ALL__" ] && { warn "Для редактирования выберите конкретный сервис"; pause; return; }
+        select_service "Выберите сервис для редактирования" "all" || return
+        local name="$SELECTED_SERVICE"
+        [ "$name" = "__ALL__" ] && { warn "Для редактирования выберите конкретный сервис"; pause; continue; }
 
-    load_service "$name" || { pause; return; }
+        load_service "$name" || { pause; continue; }
 
-    header "Редактирование: $name"
-    printf "  ${DIM}Текущие параметры:${NC}\n"
-    printf "  Цель:          ${BOLD}$SVC_TARGET_HOST:$SVC_TARGET_PORT${NC}\n"
-    printf "  Туннель:       порт ${BOLD}$SVC_TUNNEL_PORT${NC}\n"
-    [ -n "$SVC_DOMAIN" ] && printf "  Домен:         ${BOLD}$SVC_DOMAIN${NC}\n"
-    printf "  Внешний порт:  ${BOLD}$SVC_EXT_PORT${NC}\n"
-    draw_separator
+        header "Редактирование: $name"
+        printf "  ${DIM}Текущие параметры:${NC}\n"
+        printf "  Цель:          ${BOLD}$SVC_TARGET_HOST:$SVC_TARGET_PORT${NC}\n"
+        printf "  Туннель:       порт ${BOLD}$SVC_TUNNEL_PORT${NC}\n"
+        [ -n "$SVC_DOMAIN" ] && printf "  Домен:         ${BOLD}$SVC_DOMAIN${NC}\n"
+        printf "  Внешний порт:  ${BOLD}$SVC_EXT_PORT${NC}\n"
+        draw_separator
 
-    prompt "Новый адрес (IP:порт) [$SVC_TARGET_HOST:$SVC_TARGET_PORT]: "
-    local new_target="${REPLY:-$SVC_TARGET_HOST:$SVC_TARGET_PORT}"
+        prompt "Новый адрес (IP:порт) [$SVC_TARGET_HOST:$SVC_TARGET_PORT] (0 - назад): "
+        [ "$REPLY" = "0" ] && continue
+        local new_target="${REPLY:-$SVC_TARGET_HOST:$SVC_TARGET_PORT}"
 
-    local new_host="${new_target%:*}"
-    local new_port="${new_target#*:}"
-    if [ "$new_host" = "$new_port" ]; then
-        new_port="$new_host"
-        new_host="127.0.0.1"
-    fi
+        local new_host="${new_target%:*}"
+        local new_port="${new_target#*:}"
+        if [ "$new_host" = "$new_port" ]; then
+            new_port="$new_host"
+            new_host="127.0.0.1"
+        fi
 
-    # Если ничего не изменилось
-    if [ "$new_host" = "$SVC_TARGET_HOST" ] && [ "$new_port" = "$SVC_TARGET_PORT" ]; then
-        msg "Параметры не изменились."
-        pause
-        return
-    fi
+        # Если ничего не изменилось
+        if [ "$new_host" = "$SVC_TARGET_HOST" ] && [ "$new_port" = "$SVC_TARGET_PORT" ]; then
+            msg "Параметры не изменились."
+            pause
+            continue
+        fi
 
-    printf "\n"
-    draw_separator
-    printf "  ${DIM}Было:${NC}   $SVC_TARGET_HOST:$SVC_TARGET_PORT\n"
-    printf "  ${GREEN}Стало:${NC}  $new_host:$new_port\n"
-    draw_separator
+        printf "\n"
+        draw_separator
+        printf "  ${DIM}Было:${NC}   $SVC_TARGET_HOST:$SVC_TARGET_PORT\n"
+        printf "  ${GREEN}Стало:${NC}  $new_host:$new_port\n"
+        draw_separator
 
-    prompt "Применить изменения? (д/н) [д]: "
-    case "${REPLY:-д}" in
-        д|Д|y|Y|да|yes) ;;
-        *) msg "Отменено"; pause; return ;;
-    esac
+        prompt "Применить изменения? (д/н) [д]: "
+        [ "$REPLY" = "0" ] && continue
+        case "${REPLY:-д}" in
+            д|Д|y|Y|да|yes) ;;
+            *) msg "Отменено"; pause; continue ;;
+        esac
 
     printf "\n"
     msg "Применяю изменения и обновляю VPS..."
@@ -958,12 +961,13 @@ do_edit_interactive() {
     fi
 
     # Перезапустить туннель если он был запущен
-    if [ "$was_running" -eq 1 ]; then
-        do_start_service "$name"
-    fi
+        if [ "$was_running" -eq 1 ]; then
+            do_start_service "$name"
+        fi
 
-    msg "Сервис '$name' успешно обновлён локально и на VPS!"
-    pause
+        msg "Сервис '$name' успешно обновлён локально и на VPS!"
+        pause
+    done
 }
 
 # ══════════════════════════════════════════════════════════════════════
