@@ -3,7 +3,7 @@
 # Публикация локальных сервисов через SSH-туннели + nginx на VPS
 # https://github.com/l-ptrol/rProxy
 
-VERSION="1.9.6-Beta"
+VERSION="1.9.7-Beta"
 export PATH="/opt/bin:/opt/sbin:$PATH"
 CONF_DIR="/opt/etc/rproxy"
 CONF_FILE="$CONF_DIR/rproxy.conf"
@@ -401,51 +401,9 @@ find_vps_by_domain() {
     return 1
 }
 
-select_vps_interactive() {
-    SELECTED_VPS_ID=""
-    while true; do
-        clear_screen
-        draw_box "Выберите VPS для сервиса"
-        printf "\n"
-        local vps_list=""
-        local idx=0
-        for f in "$VPS_DIR"/*.conf; do
-            [ -f "$f" ] || continue
-            idx=$((idx + 1))
-            (
-                . "$f"
-                printf "  ${BOLD}%d)${NC}  %s  (${DIM}%s${NC})\n" "$idx" "$(basename "$f" .conf)" "$VPS_HOST"
-            )
-            [ -z "$vps_list" ] && vps_list="$(basename "$f" .conf)" || vps_list="$vps_list $(basename "$f" .conf)"
-        done
-        
-        draw_separator
-        printf "  ${BOLD}901)${NC} ➕  Добавить новый VPS\n"
-        printf "  ${BOLD}0)${NC}   Назад\n"
-        prompt "Выберите номер: "
-        
-        [ "$REPLY" = "0" ] && { SELECTED_SERVICE=""; return 1; }
-
-        if [ "$REPLY" = "901" ]; then
-            do_add_vps
-            # Возвращаем последний созданный (упрощение)
-            SELECTED_VPS_ID=$(ls -t "$VPS_DIR"/*.conf | head -n 1 | xargs basename | sed 's/\.conf//')
-            return 0
-        fi
-        
-        # Валидация ввода для cut
-        if echo "$REPLY" | grep -qE '^[0-9]+$'; then
-            SELECTED_VPS_ID=$(echo "$vps_list" | cut -d' ' -f"$REPLY")
-            [ -n "$SELECTED_VPS_ID" ] && return 0
-        fi
-        warn "Неверный выбор. Попробуйте еще раз."
-        sleep 1
-    done
-}
-
 build_ttyd_command_interactive() {
     local current_cmd="$1"
-    local final_cmd=""
+    TTYD_CMD_RESULT=""
     
     while true; do
         clear_screen
@@ -460,14 +418,14 @@ build_ttyd_command_interactive() {
         
         prompt "Ваш выбор: "
         case "$REPLY" in
-            1) final_cmd="login"; break ;;
-            2) final_cmd="sh"; break ;;
+            1) TTYD_CMD_RESULT="login"; break ;;
+            2) TTYD_CMD_RESULT="sh"; break ;;
             3)
                 prompt "Порт SSH [222 - Entware, 22 - Kinetic]: "
                 local port="${REPLY:-222}"
                 prompt "Пользователь [root]: "
                 local user="${REPLY:-root}"
-                final_cmd="ssh -p $port $user@localhost"
+                TTYD_CMD_RESULT="ssh -p $port $user@localhost"
                 break
                 ;;
             0) return 1 ;;
@@ -475,27 +433,11 @@ build_ttyd_command_interactive() {
         esac
     done
     
-    echo "$final_cmd"
     return 0
 }
 
-
-# ══════════════════════════════════════════════════════════════════════
-# ДОБАВИТЬ СЕРВИС (интерактивно)
-# ══════════════════════════════════════════════════════════════════════
 do_add_interactive() {
     local step=1
-    local name="" target="" mode="" domain="" ext_port="" use_ssl="no" vps_id="" 
-    local use_ndm_auth="no" htpasswd_line=""
-    local svc_type="http" # http, tcp, ttyd
-
-    while [ "$step" -gt 0 ]; do
-        clear_screen
-        draw_box "Добавить новый сервис (Шаг $step/7)"
-        printf "  ${DIM}Введите 0 на любом шаге для возврата назад${NC}\n\n"
-
-        case "$step" in
-            1)
                 prompt "Название сервиса (латиницей, без пробелов): "
                 [ "$REPLY" = "0" ] && return
                 name=$(echo "$REPLY" | tr '[:upper:]' '[:lower:]' | tr ' ' '_' | tr -cd '[:alnum:]_-')
@@ -510,18 +452,8 @@ do_add_interactive() {
                 fi
                 ;;
             2)
-                printf "  Название: ${CYAN}%s${NC}\n" "$name"
-                prompt "Адрес локального сервиса (например, 127.0.0.1:8080): "
-                [ "$REPLY" = "0" ] && { step=1; continue; }
-                target="$REPLY"
-                if [ -z "$target" ]; then
-                    warn "Адрес не может быть пустым."
-                    pause
-                    continue
-                fi
-                
-                # Шаг 2.5: Тип сервиса
-                printf "\n  ${BOLD}Тип сервиса:${NC}\n"
+                printf "  Название: ${CYAN}%s${NC}\n\n" "$name"
+                printf "  ${BOLD}Тип сервиса:${NC}\n"
                 printf "  ${BOLD}1)${NC} Веб (HTTP) — сайты, панели управления\n"
                 printf "  ${BOLD}2)${NC} Порт (TCP) — SSH (22), БД, сырой трафик\n"
                 printf "  ${BOLD}3)${NC} Терминал (ttyd) — доступ к консоли через браузер\n"
@@ -530,19 +462,38 @@ do_add_interactive() {
                 case "${REPLY:-1}" in
                     1) svc_type="http" ;;
                     2) svc_type="tcp" ;;
-                    3) 
-                        svc_type="ttyd"
-                        target="127.0.0.1:7681" # Дефолтный порт ttyd
-                        msg "Будет использован встроенный ttyd (порт 7681)"
-                        ttyd_cmd=$(build_ttyd_command_interactive)
-                        [ -z "$ttyd_cmd" ] && { step=2; continue; }
-                        sleep 1
-                        ;;
+                    3) svc_type="ttyd" ;;
                     *) warn "Неверный выбор"; pause; continue ;;
                 esac
                 step=3
                 ;;
             3)
+                printf "  Название: ${CYAN}%s${NC}\n" "$name"
+                printf "  Тип:      ${CYAN}%s${NC}\n\n" "$svc_type"
+                
+                if [ "$svc_type" = "ttyd" ]; then
+                    target="127.0.0.1:7681"
+                    msg "Будет использован встроенный ttyd (порт 7681)"
+                    if build_ttyd_command_interactive; then
+                        ttyd_cmd="$TTYD_CMD_RESULT"
+                        step=4
+                    else
+                        step=2
+                    fi
+                    continue
+                fi
+
+                prompt "Адрес локального сервиса (например, 127.0.0.1:8080): "
+                [ "$REPLY" = "0" ] && { step=2; continue; }
+                target="$REPLY"
+                if [ -z "$target" ]; then
+                    warn "Адрес не может быть пустым."
+                    pause
+                    continue
+                fi
+                step=4
+                ;;
+            4)
                 printf "  Название: ${CYAN}%s${NC}\n" "$name"
                 printf "  Цель:     ${CYAN}%s${NC}\n" "$target"
                 printf "  Тип:      ${CYAN}%s${NC}\n\n" "$svc_type"
@@ -551,14 +502,14 @@ do_add_interactive() {
                 printf "  ${BOLD}1)${NC} Да — указать доменное имя (порт 443)\n"
                 printf "  ${BOLD}2)${NC} Нет — указать внешний порт\n"
                 prompt "Выберите [2]: "
-                [ "$REPLY" = "0" ] && { step=2; continue; }
+                [ "$REPLY" = "0" ] && { step=3; continue; }
                 mode="${REPLY:-2}"
-                step=4
+                step=5
                 ;;
-            4)
+            5)
                 if [ "$mode" = "1" ]; then
                     prompt "Доменное имя (например, mysite.example.com): "
-                    [ "$REPLY" = "0" ] && { step=3; continue; }
+                    [ "$REPLY" = "0" ] && { step=4; continue; }
                     domain=$(echo "$REPLY" | tr '[:upper:]' '[:lower:]')
                     if [ -z "$domain" ]; then
                         warn "Домен не указан."
@@ -568,7 +519,7 @@ do_add_interactive() {
                     
                     ext_port=443
                     prompt "Внешний порт [$ext_port]: "
-                    [ "$REPLY" = "0" ] && { step=4; continue; }
+                    [ "$REPLY" = "0" ] && { step=5; continue; }
                     ext_port="${REPLY:-$ext_port}"
 
                     local conflict=""
@@ -594,19 +545,19 @@ do_add_interactive() {
                             sed -i "/CERTBOT_EMAIL=/d" "$CONF_FILE"
                             echo "CERTBOT_EMAIL=\"$CERTBOT_EMAIL\"" >> "$CONF_FILE"
                         fi
-                        step=5
+                        step=6
                     fi
                 else
                     ext_port=$(next_free_ext_port)
                     prompt "Внешний порт [$ext_port]: "
-                    [ "$REPLY" = "0" ] && { step=3; continue; }
+                    [ "$REPLY" = "0" ] && { step=4; continue; }
                     ext_port="${REPLY:-$ext_port}"
                     domain=""
                     use_ssl="no"
-                    step=5
+                    step=6
                 fi
                 ;;
-            5)
+            6)
                 # Автоопределение VPS если домен
                 if [ -n "$domain" ] && [ -z "$vps_id" ]; then
                     msg "Проверяю куда направлен домен $domain..."
@@ -620,20 +571,171 @@ do_add_interactive() {
                 if [ -n "$vps_id" ]; then
                     printf "  Выбран VPS: ${CYAN}%s${NC}\n" "$vps_id"
                     prompt "Изменить VPS? (д/н) [н]: "
-                    [ "$REPLY" = "0" ] && { step=4; continue; }
+                    [ "$REPLY" = "0" ] && { step=5; continue; }
                     if [ "${REPLY:-н}" = "д" ] || [ "${REPLY:-н}" = "y" ]; then
                         vps_id=""
                     fi
                 fi
 
                 if [ -z "$vps_id" ]; then
-                    select_vps_interactive || { step=4; continue; }
+                    select_vps_interactive || { step=5; continue; }
                     vps_id="$SELECTED_VPS_ID"
                 fi
                 
-                [ -n "$vps_id" ] && step=6
+                [ -n "$vps_id" ] && step=7
                 ;;
-            6)
+            7)
+                prompt "Защитить сервис паролем? (д/н) [н]: "
+                [ "$REPLY" = "0" ] && { step=6; continue; }
+                case "$REPLY" in
+                    д|Д|y|Y|да|yes) 
+                        use_ndm_auth="yes"
+                        local def_user="${DEFAULT_AUTH_USER:-admin}"
+                        
+                        prompt "Логин [$def_user]: "
+                        [ "$REPLY" = "0" ] && continue
+                        local u="${REPLY:-$def_user}"
+                        
+                        prompt "Пароль: "
+                        [ "$REPLY" = "0" ] && continue
+                        local p="$REPLY"
+                        
+                        # Сохраняем логин как дефолтный для удобства в следующий раз
+                        sed -i "/DEFAULT_AUTH_USER=/d" "$CONF_FILE"
+                        echo "DEFAULT_AUTH_USER=\"$u\"" >> "$CONF_FILE"
+                        
+                        htpasswd_line=$(gen_htpasswd "$u" "$p")
+                        ;;
+                    *) use_ndm_auth="no" ;;
+                esac
+                step=8
+                ;;
+            8)
+                clear_screen
+                draw_box "Итог: сервис '$name'"
+                draw_separator
+                printf "  ${BOLD}Тип сервиса:${NC}    $svc_type\n"
+                [ "$svc_type" = "ttyd" ] && printf "  ${BOLD}Команда:${NC}        ${CYAN}$ttyd_cmd${NC}\n"
+                printf "  ${BOLD}Цель:${NC}           $target\n"
+                [ -n "$domain" ] && printf "  ${BOLD}Домен:${NC}          $domain\n"
+                printf "  ${BOLD}Внешний порт:${NC}   $ext_port\n"
+                printf "  ${BOLD}SSL:${NC}            $use_ssl\n"
+                printf "  ${BOLD}Авторизация:${NC}   $use_ndm_auth\n"
+                draw_separator
+
+                prompt "Всё верно? Добавить сервис? (д/н) [д]: "
+                if [ "$REPLY" = "0" ]; then step=7; continue; fi
+                if [ "${REPLY:-д}" != "д" ] && [ "${REPLY:-д}" != "y" ]; then
+                    msg "Отменено"
+                    pause
+                    return
+                fi
+
+                msg "Добавляю сервис '$name'..."
+                local tmp="/tmp/rproxy_$name.conf"
+                local remote_path="$REMOTE_NGINX_DIR/rproxy_$name.conf"
+                
+                load_vps "$vps_id" || { err "Ошибка загрузки VPS"; step=6; continue; }
+                local t_host="${target%:*}"
+                local t_port="${target#*:}"
+                [ "$t_host" = "$t_port" ] && { t_port="$t_host"; t_host="127.0.0.1"; }
+                local tunnel_port=$(next_free_port)
+
+                if [ "$svc_type" = "tcp" ]; then
+                    generate_nginx_stream_conf "$name" "$tunnel_port" "$ext_port" "$tmp" "$domain"
+                    remote_path="$REMOTE_NGINX_STREAMS_DIR/rproxy_$name.conf"
+                    # Гарантируем наличие директории и инклуда в nginx.conf
+                    ssh_cmd "
+                        mkdir -p $REMOTE_NGINX_STREAMS_DIR
+                        if ! grep -q 'streams-enabled' /etc/nginx/nginx.conf; then
+                            if grep -q 'stream {' /etc/nginx/nginx.conf; then
+                                echo 'include $REMOTE_NGINX_STREAMS_DIR/*.conf;' >> /etc/nginx/nginx.conf
+                            else
+                                printf '\nstream {\n    include $REMOTE_NGINX_STREAMS_DIR/*.conf;\n}\n' >> /etc/nginx/nginx.conf
+                            fi
+                        fi
+                    " >/dev/null 2>&1
+                else
+                    generate_nginx_conf "$name" "$t_host" "$t_port" "$tunnel_port" "$domain" "$ext_port" "$use_ndm_auth" "$tmp" "$svc_type"
+                fi
+
+                prompt "Адрес локального сервиса (например, 127.0.0.1:8080): "
+                [ "$REPLY" = "0" ] && { step=2; continue; }
+                target="$REPLY"
+                if [ -z "$target" ]; then
+                    warn "Адрес не может быть пустым."
+                    pause
+                    continue
+                fi
+                step=4
+                ;;
+                prompt "Защитить сервис паролем? (д/н) [н]: "
+                [ "$REPLY" = "0" ] && { step=5; continue; }
+                case "$REPLY" in
+                    д|Д|y|Y|да|yes) 
+                        use_ndm_auth="yes"
+                        local def_user="${DEFAULT_AUTH_USER:-admin}"
+                        
+                        prompt "Логин [$def_user]: "
+                        [ "$REPLY" = "0" ] && continue
+                        local u="${REPLY:-$def_user}"
+                        
+                        prompt "Пароль: "
+                        [ "$REPLY" = "0" ] && continue
+                        local p="$REPLY"
+                        
+                        # Сохраняем логин как дефолтный для удобства в следующий раз
+                        sed -i "/DEFAULT_AUTH_USER=/d" "$CONF_FILE"
+                        echo "DEFAULT_AUTH_USER=\"$u\"" >> "$CONF_FILE"
+                        
+                        htpasswd_line=$(gen_htpasswd "$u" "$p")
+                        ;;
+                    *) use_ndm_auth="no" ;;
+                esac
+                step=7
+                ;;
+            7)
+                clear_screen
+                draw_box "Итог: сервис '$name'"
+                draw_separator
+                printf "  ${BOLD}Тип сервиса:${NC}    $svc_type\n"
+                [ "$svc_type" = "ttyd" ] && printf "  ${BOLD}Команда:${NC}        ${CYAN}$ttyd_cmd${NC}\n"
+                printf "  ${BOLD}Цель:${NC}           $target\n"
+                [ -n "$domain" ] && printf "  ${BOLD}Домен:${NC}          $domain\n"
+                printf "  ${BOLD}Внешний порт:${NC}   $ext_port\n"
+                printf "  ${BOLD}SSL:${NC}            $use_ssl\n"
+                printf "  ${BOLD}Авторизация:${NC}   $use_ndm_auth\n"
+                draw_separator
+
+                prompt "Всё верно? Добавить сервис? (д/н) [д]: "
+                if [ "$REPLY" = "0" ]; then step=6; continue; fi
+                if [ "${REPLY:-д}" != "д" ] && [ "${REPLY:-д}" != "y" ]; then
+                    msg "Отменено"
+                    pause
+                    return
+                fi
+
+                msg "Добавляю сервис '$name'..."
+                local tmp="/tmp/rproxy_$name.conf"
+                local remote_path="$REMOTE_NGINX_DIR/rproxy_$name.conf"
+                
+                if [ "$svc_type" = "tcp" ]; then
+                    generate_nginx_stream_conf "$name" "$tunnel_port" "$ext_port" "$tmp" "$domain"
+                    remote_path="$REMOTE_NGINX_STREAMS_DIR/rproxy_$name.conf"
+                    # Гарантируем наличие директории и инклуда в nginx.conf
+                    ssh_cmd "
+                        mkdir -p $REMOTE_NGINX_STREAMS_DIR
+                        if ! grep -q 'streams-enabled' /etc/nginx/nginx.conf; then
+                            if grep -q 'stream {' /etc/nginx/nginx.conf; then
+                                echo 'include $REMOTE_NGINX_STREAMS_DIR/*.conf;' >> /etc/nginx/nginx.conf
+                            else
+                                printf '\nstream {\n    include $REMOTE_NGINX_STREAMS_DIR/*.conf;\n}\n' >> /etc/nginx/nginx.conf
+                            fi
+                        fi
+                    " >/dev/null 2>&1
+                else
+                    generate_nginx_conf "$name" "$t_host" "$t_port" "$tunnel_port" "$domain" "$ext_port" "$use_ndm_auth" "$tmp" "$svc_type"
+                fi
                 prompt "Защитить сервис паролем? (д/н) [н]: "
                 [ "$REPLY" = "0" ] && { step=5; continue; }
                 case "$REPLY" in
@@ -1058,8 +1160,11 @@ do_edit_interactive() {
 
         local new_ttyd_cmd="$SVC_TTYD_CMD"
         if [ "$SVC_TYPE" = "ttyd" ]; then
-            new_ttyd_cmd=$(build_ttyd_command_interactive "$SVC_TTYD_CMD")
-            [ -z "$new_ttyd_cmd" ] && continue
+            if build_ttyd_command_interactive "$SVC_TTYD_CMD"; then
+                new_ttyd_cmd="$TTYD_CMD_RESULT"
+            else
+                continue
+            fi
         fi
 
         # Если ничего не изменилось
