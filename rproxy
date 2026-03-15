@@ -3,7 +3,7 @@
 # Публикация локальных сервисов через SSH-туннели + nginx на VPS
 # https://github.com/l-ptrol/rProxy
 
-VERSION="1.8.7-Beta"
+VERSION="1.8.8-Beta"
 export PATH="/opt/bin:/opt/sbin:$PATH"
 CONF_DIR="/opt/etc/rproxy"
 CONF_FILE="$CONF_DIR/rproxy.conf"
@@ -1251,6 +1251,26 @@ do_start_service() {
 
     echo "$real_pid" > "$pid_file"
     msg "Туннель '$name' запущен (PID: $real_pid)"
+
+    # Вывод подсказки для подключения
+    if [ "$SVC_TYPE" = "tcp" ] || [ "$SVC_TYPE" = "ssh" ]; then
+        draw_separator
+        printf "  ${BOLD}Инструкция по подключению через SSH:${NC}\n"
+        if [ -n "$SVC_DOMAIN" ]; then
+            if [ "$SVC_SSL" = "yes" ]; then
+                printf "  ${DIM}Через ProxyCommand (SSL):${NC}\n"
+                printf "  ssh -o ProxyCommand=\"openssl s_client -quiet -connect $SVC_DOMAIN:$SVC_EXT_PORT\" root@$SVC_TARGET_HOST\n"
+                printf "\n  ${DIM}Для MobaXterm:${NC}\n"
+                printf "  Ssh session -> Network settings -> SSH gateway -> Command:\n"
+                printf "  openssl s_client -quiet -connect $SVC_DOMAIN:$SVC_EXT_PORT\n"
+            else
+                printf "  ssh root@$SVC_DOMAIN -p $SVC_EXT_PORT\n"
+            fi
+        else
+            printf "  ssh root@$VPS_HOST -p $SVC_EXT_PORT\n"
+        fi
+        draw_separator
+    fi
 }
 
 do_stop_service() {
