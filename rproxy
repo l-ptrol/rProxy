@@ -3,7 +3,7 @@
 # Публикация локальных сервисов через SSH-туннели + nginx на VPS
 # https://github.com/l-ptrol/rProxy
 
-VERSION="1.8.1-Beta"
+VERSION="1.8.2-Beta"
 export PATH="/opt/bin:/opt/sbin:$PATH"
 CONF_DIR="/opt/etc/rproxy"
 CONF_FILE="$CONF_DIR/rproxy.conf"
@@ -1292,7 +1292,7 @@ generate_nginx_stream_conf() {
     local domain="$5"
 
     if [ -n "$domain" ]; then
-        # Для TCP через домен используем SSL
+        # Для TCP через домен используем SSL с расширенными настройками
         cat > "$target_file" << NGINXEOF
 server {
     listen $ext_port ssl;
@@ -1300,6 +1300,13 @@ server {
 
     ssl_certificate /etc/letsencrypt/live/$domain/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/$domain/privkey.pem;
+    
+    # Расширенные настройки SSL для стабильности TCP-потока
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers HIGH:!aNULL:!MD5;
+    ssl_handshake_timeout 15s;
+    ssl_session_cache shared:SSLSTREAM:10m;
+    ssl_session_timeout 1h;
 }
 NGINXEOF
     else
