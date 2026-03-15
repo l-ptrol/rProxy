@@ -3,7 +3,7 @@
 # Публикация локальных сервисов через SSH-туннели + nginx на VPS
 # https://github.com/l-ptrol/rProxy
 
-VERSION="2.0.0-Alpha.11"
+VERSION="2.0.0-Alpha.12"
 export PATH="/opt/bin:/opt/sbin:$PATH"
 CONF_DIR="/opt/etc/rproxy"
 CONF_FILE="$CONF_DIR/rproxy.conf"
@@ -1314,6 +1314,19 @@ do_restart_interactive() {
 # ══════════════════════════════════════════════════════════════════════
 # УПРАВЛЕНИЕ TTYD
 # ══════════════════════════════════════════════════════════════════════
+# Внутренняя функция проверки занятости порта (совместимость ss/netstat)
+_is_port_busy() {
+    local port="$1"
+    if command -v ss >/dev/null 2>&1; then
+        ss -tln | grep -q ":$port "
+    elif command -v netstat >/dev/null 2>&1; then
+        netstat -tnl | grep -q ":$port "
+    else
+        # Если нет ничего, считаем порт свободным (рискованно, но лучше чем падение)
+        return 1
+    fi
+}
+
 start_ttyd() {
     local port="${1:-7681}"
     local cmd="${SVC_TTYD_CMD:-login}"
@@ -1333,7 +1346,8 @@ start_ttyd() {
     export USER=root
     export SHELL=/bin/sh
     export PATH="/opt/bin:/opt/sbin:/usr/bin:/bin:$PATH"
-    export LD_LIBRARY_PATH="/opt/lib:/opt/usr/lib:$LD_LIBRARY_PATH"
+    # Оставляем минимальный LD_LIBRARY_PATH для предотвращения Segfault
+    export LD_LIBRARY_PATH="/opt/lib:/opt/usr/lib"
 
     # 2️⃣ Усиленная очистка
     if [ -f "$pid_file" ]; then
@@ -1342,7 +1356,7 @@ start_ttyd() {
     fi
 
     for i in 1 2 3; do
-        if ss -tln | grep -q ":$port "; then
+        if _is_port_busy "$port"; then
             msg "Порт $port занят — очистка..."
             fuser -k ${port}/tcp >/dev/null 2>&1
             pkill -9 -f "ttyd.*-p $port" >/dev/null 2>&1
@@ -1355,8 +1369,9 @@ start_ttyd() {
     # 3️⃣ Watchdog Launcher (фоновый цикл)
     (
         while true; do
-            # Проверяем наличие бинарника внутри цикла
             if [ -x "$ttyd_bin" ]; then
+                # Запускаем через env -i для максимально чистой среды, если нужно, 
+                # но пока просто прямой вызов с нашими экспортами
                 $ttyd_bin \
                     -W \
                     -a \
@@ -1369,7 +1384,7 @@ start_ttyd() {
                 echo "$(date) Error: ttyd not found at $ttyd_bin" >> "$log"
             fi
             
-            echo "$(date) ttyd stopped/crashed, restarting in 2s..." >> "$log"
+            echo "$(date) ttyd stopped/crashed (exit code $?), restarting in 2s..." >> "$log"
             sleep 2
         done
     ) &
@@ -1379,12 +1394,15 @@ start_ttyd() {
 
     # 4️⃣ Проверка запуска по порту
     sleep 2
-    if ss -tln | grep -q ":$port "; then
+    if _is_port_busy "$port"; then
         msg "ttyd успешно запущен (Watchdog PID $pid)"
         return 0
     else
         err "Ошибка запуска ttyd!"
-        [ -s "$log" ] && tail -n 10 "$log"
+        if [ -s "$log" ]; then
+            printf "${YELLOW}Последние строки лога:${NC}\n"
+            tail -n 15 "$log"
+        fi
         return 1
     fi
 }
@@ -1440,7 +1458,7 @@ do_start_service() {
     export AUTOSSH_PATH="$ssh_exec"
 
     msg "Проверка порта $SVC_TUNNEL_PORT на VPS..."
-    if ssh_cmd "ss -tln | grep -q ':$SVC_TUNNEL_PORT '"; then
+    if ssh_cmd "ss -tln | grep -q ':$SVC_TUNNEL_PORT ' || netstat -tnl | grep -q ':$SVC_TUNNEL_PORT '"; then
         warn "Порт $SVC_TUNNEL_PORT на VPS уже занят. Пытаюсь освободить..."
         ssh_cmd "fuser -k $SVC_TUNNEL_PORT/tcp >/dev/null 2>&1 || true"
         sleep 1
