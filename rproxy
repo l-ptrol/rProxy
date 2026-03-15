@@ -3,7 +3,7 @@
 # Публикация локальных сервисов через SSH-туннели + nginx на VPS
 # https://github.com/l-ptrol/rProxy
 
-VERSION="1.8.8-Beta"
+VERSION="1.8.9-Beta"
 export PATH="/opt/bin:/opt/sbin:$PATH"
 CONF_DIR="/opt/etc/rproxy"
 CONF_FILE="$CONF_DIR/rproxy.conf"
@@ -1253,7 +1253,18 @@ do_start_service() {
     msg "Туннель '$name' запущен (PID: $real_pid)"
 
     # Вывод подсказки для подключения
-    if [ "$SVC_TYPE" = "tcp" ] || [ "$SVC_TYPE" = "ssh" ]; then
+    if [ "$SVC_TYPE" = "ttyd" ]; then
+        local proto="http"
+        [ "$SVC_SSL" = "yes" ] && proto="https"
+        local url="$proto://$SVC_DOMAIN"
+        [ "$SVC_EXT_PORT" != "80" ] && [ "$SVC_EXT_PORT" != "443" ] && url="$url:$SVC_EXT_PORT"
+        [ -z "$SVC_DOMAIN" ] && url="$proto://$VPS_HOST:$SVC_EXT_PORT"
+
+        draw_separator
+        printf "  ${BOLD}Веб-терминал (ttyd) доступен по адресу:${NC}\n"
+        printf "  ${CYAN}$url${NC}\n"
+        draw_separator
+    elif [ "$SVC_TYPE" = "tcp" ] || [ "$SVC_TYPE" = "ssh" ]; then
         draw_separator
         printf "  ${BOLD}Инструкция по подключению через SSH:${NC}\n"
         if [ -n "$SVC_DOMAIN" ]; then
