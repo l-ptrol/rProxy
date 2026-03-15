@@ -3,7 +3,7 @@
 # Публикация локальных сервисов через SSH-туннели + nginx на VPS
 # https://github.com/l-ptrol/rProxy
 
-VERSION="1.8.0-Beta"
+VERSION="1.8.1-Beta"
 export PATH="/opt/bin:/opt/sbin:$PATH"
 CONF_DIR="/opt/etc/rproxy"
 CONF_FILE="$CONF_DIR/rproxy.conf"
@@ -508,18 +508,13 @@ do_add_interactive() {
                 printf "  Цель:     ${CYAN}%s${NC}\n" "$target"
                 printf "  Тип:      ${CYAN}%s${NC}\n\n" "$svc_type"
                 
-                if [ "$svc_type" = "tcp" ]; then
-                    mode="2" # Только порты для TCP
-                    step=4
-                else
-                    printf "  Привязать к домену?\n"
-                    printf "  ${BOLD}1)${NC} Да — указать доменное имя (порт 443)\n"
-                    printf "  ${BOLD}2)${NC} Нет — указать внешний порт\n"
-                    prompt "Выберите [2]: "
-                    [ "$REPLY" = "0" ] && { step=2; continue; }
-                    mode="${REPLY:-2}"
-                    step=4
-                fi
+                printf "  Привязать к домену?\n"
+                printf "  ${BOLD}1)${NC} Да — указать доменное имя (порт 443)\n"
+                printf "  ${BOLD}2)${NC} Нет — указать внешний порт\n"
+                prompt "Выберите [2]: "
+                [ "$REPLY" = "0" ] && { step=2; continue; }
+                mode="${REPLY:-2}"
+                step=4
                 ;;
             4)
                 if [ "$mode" = "1" ]; then
@@ -1294,13 +1289,27 @@ generate_nginx_stream_conf() {
     local tunnel_port="$2"
     local ext_port="$3"
     local target_file="$4"
+    local domain="$5"
 
-    cat > "$target_file" << NGINXEOF
+    if [ -n "$domain" ]; then
+        # Для TCP через домен используем SSL
+        cat > "$target_file" << NGINXEOF
+server {
+    listen $ext_port ssl;
+    proxy_pass 127.0.0.1:$tunnel_port;
+
+    ssl_certificate /etc/letsencrypt/live/$domain/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/$domain/privkey.pem;
+}
+NGINXEOF
+    else
+        cat > "$target_file" << NGINXEOF
 server {
     listen $ext_port;
     proxy_pass 127.0.0.1:$tunnel_port;
 }
 NGINXEOF
+    fi
 }
 
 generate_nginx_conf() {
