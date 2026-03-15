@@ -3,7 +3,7 @@
 # Публикация локальных сервисов через SSH-туннели + nginx на VPS
 # https://github.com/l-ptrol/rProxy
 
-VERSION="1.6.6"
+VERSION="1.6.7"
 export PATH="/opt/bin:/opt/sbin:$PATH"
 CONF_DIR="/opt/etc/rproxy"
 CONF_FILE="$CONF_DIR/rproxy.conf"
@@ -402,221 +402,278 @@ find_vps_by_domain() {
 
 select_vps_interactive() {
     SELECTED_VPS_ID=""
-    draw_box "Выберите VPS для сервиса"
-    printf "\n"
-    local vps_list=""
-    local idx=0
-    for f in "$VPS_DIR"/*.conf; do
-        [ -f "$f" ] || continue
-        idx=$((idx + 1))
-        (
-            . "$f"
-            printf "  ${BOLD}%d)${NC}  %s  (${DIM}%s${NC})\n" "$idx" "$(basename "$f" .conf)" "$VPS_HOST"
-        )
-        [ -z "$vps_list" ] && vps_list="$(basename "$f" .conf)" || vps_list="$vps_list $(basename "$f" .conf)"
-    done
-    
-    draw_separator
-    printf "  ${BOLD}901)${NC} ➕  Добавить новый VPS\n"
-    printf "  ${BOLD}0)${NC}   Назад\n"
-    prompt "Выберите номер: "
-    
-    [ "$REPLY" = "0" ] && { SELECTED_VPS_ID=""; return 0; }
+    while true; do
+        clear_screen
+        draw_box "Выберите VPS для сервиса"
+        printf "\n"
+        local vps_list=""
+        local idx=0
+        for f in "$VPS_DIR"/*.conf; do
+            [ -f "$f" ] || continue
+            idx=$((idx + 1))
+            (
+                . "$f"
+                printf "  ${BOLD}%d)${NC}  %s  (${DIM}%s${NC})\n" "$idx" "$(basename "$f" .conf)" "$VPS_HOST"
+            )
+            [ -z "$vps_list" ] && vps_list="$(basename "$f" .conf)" || vps_list="$vps_list $(basename "$f" .conf)"
+        done
+        
+        draw_separator
+        printf "  ${BOLD}901)${NC} ➕  Добавить новый VPS\n"
+        printf "  ${BOLD}0)${NC}   Назад\n"
+        prompt "Выберите номер: "
+        
+        [ "$REPLY" = "0" ] && { SELECTED_SERVICE=""; return 1; }
 
-    if [ "$REPLY" = "901" ]; then
-        do_add_vps
-        # Возвращаем последний созданный (упрощение)
-        SELECTED_VPS_ID=$(ls -t "$VPS_DIR"/*.conf | head -n 1 | xargs basename | sed 's/\.conf//')
-        return 0
-    fi
-    
-    # Валидация ввода для cut
-    if echo "$REPLY" | grep -qE '^[0-9]+$'; then
-        SELECTED_VPS_ID=$(echo "$vps_list" | cut -d' ' -f"$REPLY")
-    fi
-    return 0
+        if [ "$REPLY" = "901" ]; then
+            do_add_vps
+            # Возвращаем последний созданный (упрощение)
+            SELECTED_VPS_ID=$(ls -t "$VPS_DIR"/*.conf | head -n 1 | xargs basename | sed 's/\.conf//')
+            return 0
+        fi
+        
+        # Валидация ввода для cut
+        if echo "$REPLY" | grep -qE '^[0-9]+$'; then
+            SELECTED_VPS_ID=$(echo "$vps_list" | cut -d' ' -f"$REPLY")
+            [ -n "$SELECTED_VPS_ID" ] && return 0
+        fi
+        warn "Неверный выбор. Попробуйте еще раз."
+        sleep 1
+    done
 }
 
 # ══════════════════════════════════════════════════════════════════════
 # ДОБАВИТЬ СЕРВИС (интерактивно)
 # ══════════════════════════════════════════════════════════════════════
 do_add_interactive() {
-    clear_screen
-    draw_box "Добавить новый сервис"
-    printf "\n"
+    local step=1
+    local name="" target="" mode="" domain="" ext_port="" use_ssl="no" vps_id="" 
+    local use_ndm_auth="no" htpasswd_line=""
 
-    prompt "Название сервиса (латиницей, без пробелов): "
-    local name=$(echo "$REPLY" | tr '[:upper:]' '[:lower:]' | tr ' ' '_' | tr -cd '[:alnum:]_-')
-    [ -z "$name" ] && { warn "Название не может быть пустым"; pause; return; }
+    while [ "$step" -gt 0 ]; do
+        clear_screen
+        draw_box "Добавить новый сервис (Шаг $step/7)"
+        printf "  ${DIM}Введите 0 на любом шаге для возврата назад${NC}\n\n"
 
-    if [ -f "$SERVICES_DIR/$name.conf" ]; then
-        err "Сервис '$name' уже существует"
-        pause; return
-    fi
-
-    prompt "Адрес локального сервиса (например, 127.0.0.1:8080): "
-    local target="$REPLY"
-    [ -z "$target" ] && { warn "Адрес не может быть пустым"; pause; return; }
-
-    printf "\n  Привязать к домену?\n"
-    printf "  ${BOLD}1)${NC} Да — указать доменное имя (порт 443)\n"
-    printf "  ${BOLD}2)${NC} Нет — указать внешний порт\n"
-    prompt "Выберите [2]: "
-    local mode="${REPLY:-2}"
-
-    local domain="" ext_port="" use_ssl="no" vps_id=""
-
-    if [ "$mode" = "1" ]; then
-        prompt "Доменное имя (например, mysite.example.com): "
-        domain=$(echo "$REPLY" | tr '[:upper:]' '[:lower:]')
-        [ -z "$domain" ] && { warn "Домен не указан"; pause; return; }
-        
-        # Проверка на дубликаты доменов
-        for f in "$SERVICES_DIR"/*.conf; do
-            [ -f "$f" ] || continue
-            if grep -q "SVC_DOMAIN=\"$domain\"" "$f"; then
-                local conflict=$(basename "$f" .conf)
-                err "Домен '$domain' уже используется сервисом '$conflict'"
-                pause; return
-            fi
-        done
-
-        use_ssl="yes"; ext_port=443
-        
-        if [ -z "$CERTBOT_EMAIL" ]; then
-            prompt "Введите Email для Certbot: "
-            CERTBOT_EMAIL="$REPLY"
-            sed -i "/CERTBOT_EMAIL=/d" "$CONF_FILE"
-            echo "CERTBOT_EMAIL=\"$CERTBOT_EMAIL\"" >> "$CONF_FILE"
-        fi
-
-        # Автоопределение VPS по домену
-        msg "Проверяю куда направлен домен $domain..."
-        if find_vps_by_domain "$domain"; then
-            vps_id="$FOUND_VPS_ID"
-            msg "Домен $domain указывает на ваш VPS '$vps_id'. Выбираю его."
-        else
-            warn "Не удалось автоматически определить VPS для $domain"
-        fi
-    else
-        ext_port=$(next_free_ext_port)
-        prompt "Внешний порт [$ext_port]: "
-        ext_port="${REPLY:-$ext_port}"
-    fi
-
-    # Если VPS не определен автоматически — выбираем вручную
-    if [ -z "$vps_id" ]; then
-        select_vps_interactive
-        vps_id="$SELECTED_VPS_ID"
-        [ -z "$vps_id" ] && { warn "VPS не выбран"; pause; return; }
-    fi
-
-    # Загружаем выбранный VPS для деплоя
-    load_vps "$vps_id" || { err "Не удалось загрузить VPS '$vps_id'"; pause; return; }
-
-    # Разбор адреса
-    local t_host="${target%:*}"
-    local t_port="${target#*:}"
-    [ "$t_host" = "$t_port" ] && { t_port="$t_host"; t_host="127.0.0.1"; }
-
-    local tunnel_port=$(next_free_port)
-
-    printf "\n"
-    draw_separator
-    printf "  ${BOLD}Сервис:${NC}        $name\n"
-    printf "  ${BOLD}VPS:${NC}           $vps_id ($VPS_HOST)\n"
-    printf "  ${BOLD}Цель:${NC}          $t_host:$t_port\n"
-    printf "  ${BOLD}Туннель:${NC}       порт $tunnel_port\n"
-    [ -n "$domain" ] && printf "  ${BOLD}Домен:${NC}         $domain\n"
-    printf "  ${BOLD}Внешний порт:${NC}  $ext_port\n"
-    prompt "Защитить сервис паролем? (д/н) [н]: "
-    local use_ndm_auth="no"
-    local htpasswd_line=""
-    case "$REPLY" in
-        д|Д|y|Y|да|yes) 
-            use_ndm_auth="yes"
-            local def_user="${DEFAULT_AUTH_USER:-admin}"
-            
-            if [ -n "$DEFAULT_AUTH_PASS" ]; then
-                printf "  ${DIM}Будут использованы сохраненные данные: $def_user / *****${NC}\n"
-                prompt "Использовать их? (д/н) [д]: "
-                if [ "${REPLY:-д}" = "д" ] || [ "${REPLY:-д}" = "y" ]; then
-                    htpasswd_line=$(gen_htpasswd "$def_user" "$DEFAULT_AUTH_PASS")
-                fi
-            fi
-
-            if [ -z "$htpasswd_line" ]; then
-                prompt "Введите имя пользователя [$def_user]: "
-                local user="${REPLY:-$def_user}"
-                prompt "Введите пароль для '$user': "
-                local pass="$REPLY"
-                if [ -z "$pass" ]; then
-                     warn "Пароль не может быть пустым. Авторизация будет отключена."
-                     use_ndm_auth="no"
+        case "$step" in
+            1)
+                prompt "Название сервиса (латиницей, без пробелов): "
+                [ "$REPLY" = "0" ] && return
+                name=$(echo "$REPLY" | tr '[:upper:]' '[:lower:]' | tr ' ' '_' | tr -cd '[:alnum:]_-')
+                if [ -z "$name" ]; then
+                    warn "Название не может быть пустым."
+                    pause
+                elif [ -f "$SERVICES_DIR/$name.conf" ]; then
+                    err "Сервис '$name' уже существует."
+                    pause
                 else
-                     htpasswd_line=$(gen_htpasswd "$user" "$pass")
+                    step=2
                 fi
-            fi
-            ;;
-    esac
+                ;;
+            2)
+                printf "  Название: ${CYAN}%s${NC}\n" "$name"
+                prompt "Адрес локального сервиса (например, 127.0.0.1:8080): "
+                [ "$REPLY" = "0" ] && { step=1; continue; }
+                target="$REPLY"
+                if [ -z "$target" ]; then
+                    warn "Адрес не может быть пустым."
+                    pause
+                else
+                    step=3
+                fi
+                ;;
+            3)
+                printf "  Название: ${CYAN}%s${NC}\n" "$name"
+                printf "  Цель:     ${CYAN}%s${NC}\n\n" "$target"
+                printf "  Привязать к домену?\n"
+                printf "  ${BOLD}1)${NC} Да — указать доменное имя (порт 443)\n"
+                printf "  ${BOLD}2)${NC} Нет — указать внешний порт\n"
+                prompt "Выберите [2]: "
+                [ "$REPLY" = "0" ] && { step=2; continue; }
+                mode="${REPLY:-2}"
+                if [ "$mode" = "1" ] || [ "$mode" = "2" ]; then
+                    step=4
+                else
+                    warn "Неверный выбор."
+                    pause
+                fi
+                ;;
+            4)
+                if [ "$mode" = "1" ]; then
+                    prompt "Доменное имя (например, mysite.example.com): "
+                    [ "$REPLY" = "0" ] && { step=3; continue; }
+                    domain=$(echo "$REPLY" | tr '[:upper:]' '[:lower:]')
+                    if [ -z "$domain" ]; then
+                        warn "Домен не указан."
+                        pause
+                        continue
+                    fi
+                    
+                    local conflict=""
+                    for f in "$SERVICES_DIR"/*.conf; do
+                        [ -f "$f" ] || continue
+                        if grep -q "SVC_DOMAIN=\"$domain\"" "$f"; then
+                            conflict=$(basename "$f" .conf)
+                            break
+                        fi
+                    done
+                    
+                    if [ -n "$conflict" ]; then
+                        err "Домен '$domain' уже используется сервисом '$conflict'"
+                        pause
+                    else
+                        use_ssl="yes"; ext_port=443
+                        if [ -z "$CERTBOT_EMAIL" ]; then
+                            prompt "Введите Email для Certbot: "
+                            [ "$REPLY" = "0" ] && continue # Переспросит домен
+                            CERTBOT_EMAIL="$REPLY"
+                            sed -i "/CERTBOT_EMAIL=/d" "$CONF_FILE"
+                            echo "CERTBOT_EMAIL=\"$CERTBOT_EMAIL\"" >> "$CONF_FILE"
+                        fi
+                        step=5
+                    fi
+                else
+                    ext_port=$(next_free_ext_port)
+                    prompt "Внешний порт [$ext_port]: "
+                    [ "$REPLY" = "0" ] && { step=3; continue; }
+                    ext_port="${REPLY:-$ext_port}"
+                    domain=""
+                    use_ssl="no"
+                    step=5
+                fi
+                ;;
+            5)
+                # Автоопределение VPS если домен
+                if [ -n "$domain" ] && [ -z "$vps_id" ]; then
+                    msg "Проверяю куда направлен домен $domain..."
+                    if find_vps_by_domain "$domain"; then
+                        vps_id="$FOUND_VPS_ID"
+                        msg "Домен $domain указывает на ваш VPS '$vps_id'."
+                        sleep 1
+                    fi
+                fi
 
-    draw_separator
+                if [ -n "$vps_id" ]; then
+                    printf "  Выбран VPS: ${CYAN}%s${NC}\n" "$vps_id"
+                    prompt "Изменить VPS? (д/н) [н]: "
+                    [ "$REPLY" = "0" ] && { step=4; continue; }
+                    if [ "${REPLY:-н}" = "д" ] || [ "${REPLY:-н}" = "y" ]; then
+                        vps_id=""
+                    fi
+                fi
 
-    prompt "Всё верно? Добавить сервис? (д/н) [д]: "
-    [ "${REPLY:-д}" != "д" ] && [ "${REPLY:-д}" != "y" ] && { msg "Отменено"; pause; return; }
+                if [ -z "$vps_id" ]; then
+                    select_vps_interactive || { step=4; continue; }
+                    vps_id="$SELECTED_VPS_ID"
+                fi
+                
+                [ -n "$vps_id" ] && step=6
+                ;;
+            6)
+                prompt "Защитить сервис паролем? (д/н) [н]: "
+                [ "$REPLY" = "0" ] && { step=5; continue; }
+                case "$REPLY" in
+                    д|Д|y|Y|да|yes) 
+                        use_ndm_auth="yes"
+                        local def_user="${DEFAULT_AUTH_USER:-admin}"
+                        
+                        if [ -n "$DEFAULT_AUTH_PASS" ]; then
+                            printf "  ${DIM}Будут использованы сохраненные данные: $def_user / *****${NC}\n"
+                            prompt "Использовать их? (д/н) [д]: "
+                            if [ "${REPLY:-д}" = "д" ] || [ "${REPLY:-д}" = "y" ]; then
+                                htpasswd_line=$(gen_htpasswd "$def_user" "$DEFAULT_AUTH_PASS")
+                                step=7
+                                continue
+                            fi
+                        fi
 
-    msg "Добавляю сервис '$name'..."
+                        prompt "Введите имя пользователя [$def_user]: "
+                        [ "$REPLY" = "0" ] && { use_ndm_auth="no"; continue; }
+                        local user="${REPLY:-$def_user}"
+                        prompt "Введите пароль для '$user': "
+                        [ "$REPLY" = "0" ] && continue
+                        local pass="$REPLY"
+                        if [ -z "$pass" ]; then
+                             warn "Пароль не может быть пустым."
+                             pause
+                             continue
+                        fi
+                        htpasswd_line=$(gen_htpasswd "$user" "$pass")
+                        step=7
+                        ;;
+                    *)
+                        use_ndm_auth="no"
+                        htpasswd_line=""
+                        step=7
+                        ;;
+                esac
+                ;;
+            7)
+                load_vps "$vps_id" || { err "Ошибка загрузки VPS"; step=5; continue; }
+                local t_host="${target%:*}"
+                local t_port="${target#*:}"
+                [ "$t_host" = "$t_port" ] && { t_port="$t_host"; t_host="127.0.0.1"; }
+                local tunnel_port=$(next_free_port)
 
-    # Конфигурация авторизации
-    local auth_config=""
-    if [ "$use_ndm_auth" = "yes" ]; then
-        auth_config="
-    auth_basic \"Restricted Access\";
-    auth_basic_user_file /etc/nginx/rproxy_$name.htpasswd;
-    "
-    fi
+                draw_separator
+                printf "  ${BOLD}Сервис:${NC}        $name\n"
+                printf "  ${BOLD}VPS:${NC}           $vps_id ($VPS_HOST)\n"
+                printf "  ${BOLD}Цель:${NC}          $t_host:$t_port\n"
+                printf "  ${BOLD}Туннель:${NC}       порт $tunnel_port\n"
+                [ -n "$domain" ] && printf "  ${BOLD}Домен:${NC}         $domain\n"
+                printf "  ${BOLD}Внешний порт:${NC}  $ext_port\n"
+                printf "  ${BOLD}Авторизация:${NC}   $use_ndm_auth\n"
+                draw_separator
 
-    local tmp="/tmp/rproxy_$name.conf"
-    generate_nginx_conf "$name" "$t_host" "$t_port" "$tunnel_port" "$domain" "$ext_port" "$use_ndm_auth" "$tmp"
+                prompt "Всё верно? Добавить сервис? (д/н) [д]: "
+                if [ "$REPLY" = "0" ]; then step=6; continue; fi
+                if [ "${REPLY:-д}" != "д" ] && [ "${REPLY:-д}" != "y" ]; then
+                    msg "Отменено"
+                    pause
+                    return
+                fi
 
-    # Деплой
-    # Деплой htpasswd если нужно
-    if [ "$use_ndm_auth" = "yes" ]; then
-        local ht_tmp="/tmp/rproxy_$name.htpasswd"
-        echo "$htpasswd_line" > "$ht_tmp"
-        scp_cmd "$ht_tmp" "$VPS_USER@$VPS_HOST:/etc/nginx/rproxy_$name.htpasswd"
-        rm -f "$ht_tmp"
-    fi
+                msg "Добавляю сервис '$name'..."
+                local tmp="/tmp/rproxy_$name.conf"
+                generate_nginx_conf "$name" "$t_host" "$t_port" "$tunnel_port" "$domain" "$ext_port" "$use_ndm_auth" "$tmp"
 
-    # Деплой nginx
-    scp_cmd "$tmp" "$VPS_USER@$VPS_HOST:$REMOTE_NGINX_DIR/rproxy_$name.conf" || { err "Ошибка деплоя nginx"; rm -f "$tmp"; pause; return; }
-    rm -f "$tmp"
-    ssh_cmd "nginx -t && systemctl reload nginx" >/dev/null 2>&1
+                if [ "$use_ndm_auth" = "yes" ]; then
+                    local ht_tmp="/tmp/rproxy_$name.htpasswd"
+                    echo "$htpasswd_line" > "$ht_tmp"
+                    scp_cmd "$ht_tmp" "$VPS_USER@$VPS_HOST:/etc/nginx/rproxy_$name.htpasswd"
+                    rm -f "$ht_tmp"
+                fi
 
-    # SSL если нужно
-    if [ "$use_ssl" = "yes" ]; then
-        msg "Получаю SSL через Certbot (может занять время)..."
-        ssh_cmd "certbot --nginx -d $domain --non-interactive --agree-tos -m $CERTBOT_EMAIL" || warn "Certbot вернул ошибку"
-    fi
+                scp_cmd "$tmp" "$VPS_USER@$VPS_HOST:$REMOTE_NGINX_DIR/rproxy_$name.conf" || { err "Ошибка деплоя nginx"; rm -f "$tmp"; pause; step=7; continue; }
+                rm -f "$tmp"
+                ssh_cmd "nginx -t && systemctl reload nginx" >/dev/null 2>&1
 
-    # Сохранение конфига сервиса (используем printf для защиты от спецсимволов и одинарные кавычки)
-    {
-        printf 'SVC_NAME="%s"\n' "$name"
-        printf 'SVC_VPS="%s"\n' "$vps_id"
-        printf 'SVC_TARGET_HOST="%s"\n' "$t_host"
-        printf 'SVC_TARGET_PORT="%s"\n' "$t_port"
-        printf 'SVC_TUNNEL_PORT="%s"\n' "$tunnel_port"
-        printf 'SVC_EXT_PORT="%s"\n' "$ext_port"
-        printf 'SVC_DOMAIN="%s"\n' "$domain"
-        printf 'SVC_SSL="%s"\n' "$use_ssl"
-        printf 'SVC_NDM_AUTH="%s"\n' "$use_ndm_auth"
-        printf "SVC_HTPASSWD='%s'\n" "$htpasswd_line"
-        printf 'SVC_ENABLED="yes"\n'
-    } > "$SERVICES_DIR/$name.conf"
+                if [ "$use_ssl" = "yes" ]; then
+                    msg "Получаю SSL через Certbot (может занять время)..."
+                    ssh_cmd "certbot --nginx -d $domain --non-interactive --agree-tos -m $CERTBOT_EMAIL" || warn "Certbot вернул ошибку"
+                fi
 
-    msg "Сервис '$name' добавлен на VPS '$vps_id'!"
-    do_start_service "$name"
-    pause
+                {
+                    printf 'SVC_NAME="%s"\n' "$name"
+                    printf 'SVC_VPS="%s"\n' "$vps_id"
+                    printf 'SVC_TARGET_HOST="%s"\n' "$t_host"
+                    printf 'SVC_TARGET_PORT="%s"\n' "$t_port"
+                    printf 'SVC_TUNNEL_PORT="%s"\n' "$tunnel_port"
+                    printf 'SVC_EXT_PORT="%s"\n' "$ext_port"
+                    printf 'SVC_DOMAIN="%s"\n' "$domain"
+                    printf 'SVC_SSL="%s"\n' "$use_ssl"
+                    printf 'SVC_NDM_AUTH="%s"\n' "$use_ndm_auth"
+                    printf "SVC_HTPASSWD='%s'\n" "$htpasswd_line"
+                    printf 'SVC_ENABLED="yes"\n'
+                } > "$SERVICES_DIR/$name.conf"
+
+                msg "Сервис '$name' добавлен!"
+                do_start_service "$name"
+                pause
+                return
+                ;;
+        esac
+    done
 }
 
 # ══════════════════════════════════════════════════════════════════════
@@ -956,35 +1013,34 @@ select_service() {
     draw_separator
     printf "  ${BOLD}903)${NC} Все сервисы\n"
     printf "  ${BOLD}0)${NC}   Назад\n"
-    prompt "Выберите номер(а) (через пробел или 903): "
+    while true; do
+        prompt "Выберите номер(а) (через пробел или 903): "
 
-    [ "$REPLY" = "0" ] && { SELECTED_SERVICE=""; return 1; }
-    if [ "$REPLY" = "903" ]; then
-        SELECTED_SERVICE="__ALL__"
-        return 0
-    fi
-
-    # Поддержка ввода нескольких номеров через пробел
-    local sel_names=""
-    local valid=0
-    for r in $REPLY; do
-        if echo "$r" | grep -qE '^[0-9]+$'; then
-            local n=$(echo "$services" | cut -d' ' -f"$r")
-            if [ -n "$n" ]; then
-                [ -z "$sel_names" ] && sel_names="$n" || sel_names="$sel_names $n"
-                valid=1
-            fi
+        [ "$REPLY" = "0" ] && { SELECTED_SERVICE=""; return 1; }
+        if [ "$REPLY" = "903" ]; then
+            SELECTED_SERVICE="__ALL__"
+            return 0
         fi
-    done
 
-    if [ "$valid" -eq 1 ]; then
-        SELECTED_SERVICE="$sel_names"
-        return 0
-    else
-        SELECTED_SERVICE=""
-        warn "Неверный выбор"
-        return 1
-    fi
+        # Поддержка ввода нескольких номеров через пробел
+        local sel_names=""
+        local valid=0
+        for r in $REPLY; do
+            if echo "$r" | grep -qE '^[0-9]+$'; then
+                local n=$(echo "$services" | cut -d' ' -f"$r")
+                if [ -n "$n" ]; then
+                    [ -z "$sel_names" ] && sel_names="$n" || sel_names="$sel_names $n"
+                    valid=1
+                fi
+            fi
+        done
+
+        if [ "$valid" -eq 1 ]; then
+            SELECTED_SERVICE="$sel_names"
+            return 0
+        fi
+        warn "Неверный выбор. Попробуйте еще раз."
+    done
 }
 
 # ══════════════════════════════════════════════════════════════════════
