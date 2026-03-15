@@ -3,7 +3,7 @@
 # Публикация локальных сервисов через SSH-туннели + nginx на VPS
 # https://github.com/l-ptrol/rProxy
 
-VERSION="1.9.7-Beta.4"
+VERSION="1.9.7-Beta.5"
 export PATH="/opt/bin:/opt/sbin:$PATH"
 CONF_DIR="/opt/etc/rproxy"
 CONF_FILE="$CONF_DIR/rproxy.conf"
@@ -467,7 +467,7 @@ build_ttyd_command_interactive() {
                 local port="${REPLY:-222}"
                 prompt "Пользователь [root]: "
                 local user="${REPLY:-root}"
-                TTYD_CMD_RESULT="ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p $port $user@localhost"
+                TTYD_CMD_RESULT="ssh -t -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p $port $user@localhost"
                 break
                 ;;
             0) return 1 ;;
@@ -746,7 +746,7 @@ do_add_interactive() {
                         if [ "$svc_type" = "tcp" ]; then
                             generate_nginx_stream_conf "$name" "$tunnel_port" "$ext_port" "$tmp" "$domain"
                         else
-                            generate_nginx_conf "$name" "$t_host" "$t_port" "$tunnel_port" "$domain" "$ext_port" "$use_ndm_auth" "$tmp" "$svc_type"
+                            generate_nginx_conf "$name" "$t_host" "$t_port" "$tunnel_port" "$domain" "$ext_port" "$use_ndm_auth" "$tmp" "$use_ssl" "$svc_type"
                         fi
                         scp_cmd "$tmp" "$VPS_USER@$VPS_HOST:$remote_path"
                         ssh_cmd "nginx -t && systemctl reload nginx" >/dev/null 2>&1
@@ -854,7 +854,7 @@ do_ssl_interactive() {
             generate_nginx_stream_conf "$name" "$SVC_TUNNEL_PORT" "$SVC_EXT_PORT" "$tmp" "$SVC_DOMAIN"
             remote_path="$REMOTE_NGINX_STREAMS_DIR/rproxy_$name.conf"
         else
-            generate_nginx_conf "$name" "$SVC_TARGET_HOST" "$SVC_TARGET_PORT" "$SVC_TUNNEL_PORT" "$SVC_DOMAIN" "$SVC_EXT_PORT" "$SVC_NDM_AUTH" "$tmp" "$SVC_TYPE"
+            generate_nginx_conf "$name" "$SVC_TARGET_HOST" "$SVC_TARGET_PORT" "$SVC_TUNNEL_PORT" "$SVC_DOMAIN" "$SVC_EXT_PORT" "$SVC_NDM_AUTH" "$tmp" "yes" "$SVC_TYPE"
         fi
 
         scp_cmd "$tmp" "$VPS_USER@$VPS_HOST:$remote_path"
@@ -1114,7 +1114,7 @@ do_edit_interactive() {
         generate_nginx_stream_conf "$name" "$SVC_TUNNEL_PORT" "$new_ext_port" "$tmp" "$SVC_DOMAIN"
         remote_path="$REMOTE_NGINX_STREAMS_DIR/rproxy_$name.conf"
     else
-        generate_nginx_conf "$name" "$new_host" "$new_port" "$SVC_TUNNEL_PORT" "$SVC_DOMAIN" "$new_ext_port" "$SVC_NDM_AUTH" "$tmp" "$SVC_TYPE"
+        generate_nginx_conf "$name" "$new_host" "$new_port" "$SVC_TUNNEL_PORT" "$SVC_DOMAIN" "$new_ext_port" "$SVC_NDM_AUTH" "$tmp" "$SVC_SSL" "$SVC_TYPE"
     fi
 
     scp_cmd "$tmp" "$VPS_USER@$VPS_HOST:$remote_path"
@@ -1483,11 +1483,8 @@ generate_nginx_conf() {
     local ext_port="$6"
     local use_ndm_auth="$7"
     local target_file="$8"
-    local type="${9:-http}"
-
-    # Загружаем SSL статус
-    local use_ssl="no"
-    [ -f "$SERVICES_DIR/$name.conf" ] && use_ssl=$(grep "SVC_SSL=" "$SERVICES_DIR/$name.conf" | cut -d'"' -f2)
+    local use_ssl="${9:-no}"
+    local type="${10:-http}"
 
     local stealth_host="$t_host"
     [ "$t_port" != "80" ] && stealth_host="$t_host:$t_port"
