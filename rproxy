@@ -3,7 +3,7 @@
 # Публикация локальных сервисов через SSH-туннели + nginx на VPS
 # https://github.com/l-ptrol/rProxy
 
-VERSION="1.9.0-Beta"
+VERSION="1.9.1-Beta"
 export PATH="/opt/bin:/opt/sbin:$PATH"
 CONF_DIR="/opt/etc/rproxy"
 CONF_FILE="$CONF_DIR/rproxy.conf"
@@ -957,6 +957,20 @@ do_remove_interactive() {
             )
             msg "Сервис '$name' удалён"
         done
+    else
+        # Удаление выбранных сервисов
+        for name in $selected; do
+            msg "Удаление сервиса '$name'..."
+            (
+                load_service "$name" || exit 1
+                is_running "$name" && do_stop_service "$name"
+
+                ssh_cmd "rm -f $REMOTE_NGINX_DIR/rproxy_$name.conf $REMOTE_NGINX_STREAMS_DIR/rproxy_$name.conf /etc/nginx/rproxy_$name.htpasswd && nginx -t && systemctl reload nginx" >/dev/null 2>&1
+                rm -f "$SERVICES_DIR/$name.conf"
+                rm -f "$(get_pid_file "$name")"
+            )
+            msg "Сервис '$name' удалён"
+        done
     fi
     pause
 }
@@ -1146,7 +1160,9 @@ do_start_interactive() {
     if [ "$SELECTED_SERVICE" = "__ALL__" ]; then
         do_start_all
     else
-        do_start_service "$SELECTED_SERVICE"
+        for name in $SELECTED_SERVICE; do
+            do_start_service "$name"
+        done
     fi
     pause
 }
@@ -1160,7 +1176,9 @@ do_stop_interactive() {
     if [ "$SELECTED_SERVICE" = "__ALL__" ]; then
         do_stop_all
     else
-        do_stop_service "$SELECTED_SERVICE"
+        for name in $SELECTED_SERVICE; do
+            do_stop_service "$name"
+        done
     fi
     pause
 }
@@ -1174,16 +1192,17 @@ do_restart_interactive() {
     if [ "$SELECTED_SERVICE" = "__ALL__" ]; then
         for f in "$SERVICES_DIR"/*.conf; do
             [ -f "$f" ] || continue
-            . "$f"
-            do_stop_service "$SVC_NAME"
+            local s_name=$(basename "$f" .conf)
+            do_stop_service "$s_name"
             sleep 1
-            do_start_service "$SVC_NAME"
+            do_start_service "$s_name"
         done
     else
-        load_service "$SELECTED_SERVICE"
-        do_stop_service "$SELECTED_SERVICE"
-        sleep 1
-        do_start_service "$SELECTED_SERVICE"
+        for name in $SELECTED_SERVICE; do
+            do_stop_service "$name"
+            sleep 1
+            do_start_service "$name"
+        done
     fi
     pause
 }
