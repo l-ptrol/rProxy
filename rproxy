@@ -3,7 +3,7 @@
 # Публикация локальных сервисов через SSH-туннели + nginx на VPS
 # https://github.com/l-ptrol/rProxy
 
-VERSION="1.8.9-Beta"
+VERSION="1.9.0-Beta"
 export PATH="/opt/bin:/opt/sbin:$PATH"
 CONF_DIR="/opt/etc/rproxy"
 CONF_FILE="$CONF_DIR/rproxy.conf"
@@ -1192,6 +1192,9 @@ do_restart_interactive() {
 # ЗАПУСК / ОСТАНОВ (одного сервиса)
 # ══════════════════════════════════════════════════════════════════════
 do_start_service() {
+    local name="$1"
+    load_service "$name" || return
+
     msg "Запускаю туннель '$name' ($SVC_TARGET_HOST:$SVC_TARGET_PORT → VPS:$SVC_TUNNEL_PORT)..."
 
     # Если это ttyd - запускаем его локально
@@ -1203,10 +1206,10 @@ do_start_service() {
         
         if command -v ttyd >/dev/null 2>&1; then
             msg "Запускаю ttyd на порту 7681..."
-            # Запускаем ttyd в фоне, если еще не запущен
-            if ! pgrep -x ttyd >/dev/null 2>&1; then
-                ttyd -p 7681 login >/dev/null 2>&1 &
-            fi
+            # Гарантируем, что порт свободен
+            fuser -k 7681/tcp >/dev/null 2>&1 || pkill -x ttyd 2>/dev/null
+            sleep 1
+            ttyd -p 7681 login >/dev/null 2>&1 &
         else
             err "Не удалось установить ttyd. Проверьте интернет или opkg."
         fi
