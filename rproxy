@@ -3,7 +3,7 @@
 # Публикация локальных сервисов через SSH-туннели + nginx на VPS
 # https://github.com/l-ptrol/rProxy
 
-VERSION="2.0.0-Alpha.9"
+VERSION="2.0.0-Alpha.10"
 export PATH="/opt/bin:/opt/sbin:$PATH"
 CONF_DIR="/opt/etc/rproxy"
 CONF_FILE="$CONF_DIR/rproxy.conf"
@@ -1321,73 +1321,70 @@ start_ttyd() {
     local pid_file="/opt/var/run/rproxy/ttyd_${port}.pid"
     local ttyd_bin="/opt/bin/ttyd"
 
-    msg "Запуск ttyd терминала..."
+    msg "Запуск ttyd терминала с Watchdog..."
     msg "Порт: $port"
     msg "Команда: $cmd"
 
-    # Проверяем наличие бинарника
-    if [ ! -x "$ttyd_bin" ]; then
-        msg "Установка ttyd через opkg..."
-        opkg update >/dev/null 2>&1
-        opkg install ttyd >/dev/null 2>&1
-    fi
+    mkdir -p /opt/var/run/rproxy
 
-    if [ ! -x "$ttyd_bin" ]; then
-        err "ttyd не найден по пути $ttyd_bin. Пожалуйста, установите его вручную: opkg install ttyd"
-        return 1
-    fi
-
-    # 1️⃣ Расширенные переменные окружения (критично для Keenetic/Entware)
+    # 1️⃣ Расширенные переменные окружения
     export TERM=xterm-256color
     export HOME=/root
     export USER=root
     export SHELL=/bin/sh
     export PATH="/opt/bin:/opt/sbin:/usr/bin:/bin:$PATH"
-    export TERMINFO=/opt/share/terminfo
     export LD_LIBRARY_PATH="/opt/lib:/opt/usr/lib:$LD_LIBRARY_PATH"
 
-    # 2️⃣ Усиленная очистка порта
-    msg "Очистка порта $port..."
+    # 2️⃣ Усиленная очистка
     if [ -f "$pid_file" ]; then
         kill "$(cat "$pid_file")" 2>/dev/null
         rm -f "$pid_file"
     fi
-    pkill -9 -f "ttyd.*-p $port" >/dev/null 2>&1
-    
-    if ss -tln | grep -q ":$port "; then
-        fuser -k ${port}/tcp >/dev/null 2>&1
-        sleep 2
-    fi
 
-    msg "Запуск: $ttyd_bin -W -a -i 0.0.0.0 -p $port $cmd"
+    for i in 1 2 3; do
+        if ss -tln | grep -q ":$port "; then
+            msg "Порт $port занят — очистка..."
+            fuser -k ${port}/tcp >/dev/null 2>&1
+            pkill -9 -f "ttyd.*-p $port" >/dev/null 2>&1
+            sleep 1
+        else
+            break
+        fi
+    done
 
-    # 3️⃣ Запуск через nohup для изоляции процесса
-    nohup $ttyd_bin \
-        -W \
-        -a \
-        -i 0.0.0.0 \
-        -p "$port" \
-        $cmd \
-        > "$log" 2>&1 &
+    # 3️⃣ Watchdog Launcher (фоновый цикл)
+    (
+        while true; do
+            # Проверяем наличие бинарника внутри цикла
+            if [ -x "$ttyd_bin" ]; then
+                $ttyd_bin \
+                    -W \
+                    -a \
+                    --max-clients 10 \
+                    -i 0.0.0.0 \
+                    -p "$port" \
+                    $cmd \
+                    >> "$log" 2>&1
+            else
+                echo "$(date) Error: ttyd not found at $ttyd_bin" >> "$log"
+            fi
+            
+            echo "$(date) ttyd stopped/crashed, restarting in 2s..." >> "$log"
+            sleep 2
+        done
+    ) &
 
     local pid=$!
     echo "$pid" > "$pid_file"
 
-    # 4️⃣ Проверка через мониторинг порта (вместо kill -0, так как ttyd может форкаться)
-    msg "Ожидание инициализации порта..."
+    # 4️⃣ Проверка запуска по порту
     sleep 2
-
     if ss -tln | grep -q ":$port "; then
-        msg "ttyd успешно запущен и слушает порт $port"
+        msg "ttyd успешно запущен (Watchdog PID $pid)"
         return 0
     else
         err "Ошибка запуска ttyd!"
-        if [ -s "$log" ]; then
-            printf "${YELLOW}Последние строки лога:${NC}\n"
-            tail -n 20 "$log"
-        else
-            err "Лог пуст. Возможна проблема с правами доступа или бинарником."
-        fi
+        [ -s "$log" ] && tail -n 10 "$log"
         return 1
     fi
 }
@@ -1397,12 +1394,15 @@ stop_ttyd() {
     local pid_file="/opt/var/run/rproxy/ttyd_${port}.pid"
 
     if [ -f "$pid_file" ]; then
-        kill "$(cat "$pid_file")" 2>/dev/null
+        local pid=$(cat "$pid_file")
+        msg "Остановка Watchdog ttyd (PID $pid)..."
+        kill "$pid" 2>/dev/null
         rm -f "$pid_file"
-        msg "ttyd остановлен (порт $port)"
     fi
     pkill -9 -f "ttyd.*-p $port" >/dev/null 2>&1
     fuser -k ${port}/tcp >/dev/null 2>&1
+}
+
 }
 
 do_start_service() {
@@ -2039,6 +2039,25 @@ case "${1:-}" in
                 printf "  %-15s %-7s %-20s %s\n" "$SVC_NAME" "$type" "$addr" "$status"
             )
         done
+        ;;
+    init-script)
+        cat <<EOF > /opt/etc/init.d/S99rproxy
+#!/bin/sh
+
+case "\$1" in
+start)
+    /opt/bin/rproxy start
+    ;;
+stop)
+    /opt/bin/rproxy stop
+    ;;
+restart)
+    /opt/bin/rproxy restart
+    ;;
+esac
+EOF
+        chmod +x /opt/etc/init.d/S99rproxy
+        msg "Скрипт автозагрузки создан: /opt/etc/init.d/S99rproxy"
         ;;
     -v|--version) echo "rProxy v$VERSION" ;;
     "")         main_menu ;;
