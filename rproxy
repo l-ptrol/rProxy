@@ -3,7 +3,7 @@
 # Публикация локальных сервисов через SSH-туннели + nginx на VPS
 # https://github.com/l-ptrol/rProxy
 
-VERSION="1.6.9-Beta"
+VERSION="1.7.0-Beta"
 export PATH="/opt/bin:/opt/sbin:$PATH"
 CONF_DIR="/opt/etc/rproxy"
 CONF_FILE="$CONF_DIR/rproxy.conf"
@@ -656,8 +656,16 @@ do_add_interactive() {
                 ssh_cmd "nginx -t && systemctl reload nginx" >/dev/null 2>&1
 
                 if [ "$use_ssl" = "yes" ]; then
-                    msg "Получаю SSL через Certbot (может занять время)..."
-                    ssh_cmd "certbot --nginx -d $domain --non-interactive --agree-tos -m $CERTBOT_EMAIL" || warn "Certbot вернул ошибку"
+                    msg "Проверяю наличие SSL для $domain на VPS..."
+                    if check_remote_ssl "$domain"; then
+                        msg "Обнаружен существующий сертификат для $domain! Использую его."
+                        generate_nginx_conf "$name" "$t_host" "$t_port" "$tunnel_port" "$domain" "$ext_port" "$use_ndm_auth" "$tmp"
+                        scp_cmd "$tmp" "$VPS_USER@$VPS_HOST:$REMOTE_NGINX_DIR/rproxy_$name.conf"
+                        ssh_cmd "nginx -t && systemctl reload nginx" >/dev/null 2>&1
+                    else
+                        msg "Получаю SSL через Certbot (может занять время)..."
+                        ssh_cmd "certbot --nginx -d $domain --non-interactive --agree-tos -m $CERTBOT_EMAIL" || warn "Certbot вернул ошибку"
+                    fi
                 fi
 
                 {
@@ -720,17 +728,26 @@ do_ssl_interactive() {
         warn "Не удалось автоматически установить Certbot на VPS"
     }
 
-    msg "Запрашиваю сертификат для $SVC_DOMAIN..."
-    if ssh_cmd "certbot --nginx -d $SVC_DOMAIN --non-interactive --agree-tos -m $CERTBOT_EMAIL"; then
-        msg "SSL сертификат успешно получен!"
-        # Обновляем конфиг сервиса
+    msg "Проверяю наличие SSL для $SVC_DOMAIN на VPS..."
+    if check_remote_ssl "$SVC_DOMAIN"; then
+        msg "Обнаружен существующий сертификат! Перенастраиваю Nginx..."
+        local tmp="/tmp/rproxy_ssl_$name.conf"
+        generate_nginx_conf "$name" "$SVC_TARGET_HOST" "$SVC_TARGET_PORT" "$SVC_TUNNEL_PORT" "$SVC_DOMAIN" "$SVC_EXT_PORT" "$SVC_NDM_AUTH" "$tmp"
+        scp_cmd "$tmp" "$VPS_USER@$VPS_HOST:$REMOTE_NGINX_DIR/rproxy_$name.conf"
+        rm -f "$tmp"
+        ssh_cmd "nginx -t && systemctl reload nginx"
+        msg "Nginx обновлен для использования существующего SSL."
         sed -i "s/SVC_SSL=.*/SVC_SSL=\"yes\"/" "$SERVICES_DIR/$name.conf"
-        
-        # Проверка автопродления (добавляем таймер/крон если нет)
-        ssh_cmd "systemctl is-active certbot.timer >/dev/null 2>&1 || (crontab -l 2>/dev/null | grep -q certbot || (crontab -l 2>/dev/null; echo \"0 0,12 * * * certbot renew -q\") | crontab -)"
     else
-        err "Certbot не смог выпустить сертификат"
-        warn "Убедитесь, что домен $SVC_DOMAIN указывает на этот VPS и порт 80 открыт"
+        msg "Запрашиваю новый сертификат для $SVC_DOMAIN..."
+        if ssh_cmd "certbot --nginx -d $SVC_DOMAIN --non-interactive --agree-tos -m $CERTBOT_EMAIL"; then
+            msg "SSL сертификат успешно получен!"
+            sed -i "s/SVC_SSL=.*/SVC_SSL=\"yes\"/" "$SERVICES_DIR/$name.conf"
+            ssh_cmd "systemctl is-active certbot.timer >/dev/null 2>&1 || (crontab -l 2>/dev/null | grep -q certbot || (crontab -l 2>/dev/null; echo \"0 0,12 * * * certbot renew -q\") | crontab -)"
+        else
+            err "Certbot не смог выпустить сертификат"
+            warn "Убедитесь, что домен $SVC_DOMAIN указывает на этот VPS и порт 80 открыт"
+        fi
     fi
     pause
 }
@@ -1203,6 +1220,12 @@ load_service() {
     load_vps "$SVC_VPS"
 }
 
+check_remote_ssl() {
+    local domain="$1"
+    # Проверяем наличие папки сертификата в LetsEncrypt на VPS
+    ssh_cmd "[ -d /etc/letsencrypt/live/$domain ]" >/dev/null 2>&1
+}
+
 generate_nginx_conf() {
     local name="$1"
     local t_host="$2"
@@ -1229,17 +1252,56 @@ generate_nginx_conf() {
     fi
 
     if [ -n "$domain" ]; then
-        # Для доменов всегда сначала создаем конфиг на 80 порту. 
-        # Certbot сам добавит listen 443 ssl и настройки сертификатов.
-        local listen_opts="80"
+        # Если домен указан, проверяем наличие SSL сертификата на VPS
+        local has_ssl=0
+        check_remote_ssl "$domain" && has_ssl=1
         
-        # Если порт не стандартный (не 80 и не 443), то Certbot может не сработать автоматом на установку,
-        # но для начала нам нужно избежать дубликата 443.
-        [ "$ext_port" != "80" ] && [ "$ext_port" != "443" ] && listen_opts="$ext_port"
-
-        cat > "$target_file" << NGINXEOF
+        # Для доменов используем SSL по умолчанию, если он есть или если явно включен
+        if [ "$has_ssl" = "1" ] || [ "$use_ssl" = "yes" ]; then
+            local listen_opts="$ext_port ssl"
+            [ "$ext_port" = "443" ] || listen_opts="$ext_port ssl"
+            
+            cat > "$target_file" << NGINXEOF
 server {
     listen $listen_opts;
+    server_name "$domain";
+    proxy_buffering off;
+    proxy_request_buffering off;
+    
+    ssl_certificate /etc/letsencrypt/live/$domain/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/$domain/privkey.pem;
+    include /etc/letsencrypt/options-ssl-nginx.conf;
+    ssl_dhparam /etc/letsencrypt/ssl-dhparams.pem;
+
+    location / {
+        $auth_config
+        proxy_pass http://127.0.0.1:$tunnel_port;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_cookie_domain "$t_host" "\$host";
+    }
+}
+NGINXEOF
+            # Добавляем редирект с 80 порта на этот домен, если это 443
+            if [ "$ext_port" = "443" ]; then
+                cat >> "$target_file" << NGINXEOF
+server {
+    listen 80;
+    server_name "$domain";
+    return 301 https://\$host\$request_uri;
+}
+NGINXEOF
+            fi
+        else
+            # Если SSL еще нет и не включен явно — создаем временный 80/ext_port для Certbot
+            cat > "$target_file" << NGINXEOF
+server {
+    listen $ext_port;
     server_name "$domain";
     proxy_buffering off;
     proxy_request_buffering off;
@@ -1257,6 +1319,7 @@ server {
     }
 }
 NGINXEOF
+        fi
     else
         cat > "$target_file" << NGINXEOF
 server {
