@@ -3,7 +3,7 @@
 # Публикация локальных сервисов через SSH-туннели + nginx на VPS
 # https://github.com/l-ptrol/rProxy
 
-VERSION="2.0.0-Alpha.5"
+VERSION="2.0.0-Alpha.6"
 export PATH="/opt/bin:/opt/sbin:$PATH"
 CONF_DIR="/opt/etc/rproxy"
 CONF_FILE="$CONF_DIR/rproxy.conf"
@@ -483,12 +483,14 @@ build_ttyd_command_interactive() {
             1) TTYD_CMD_RESULT="login"; break ;;
             2) TTYD_CMD_RESULT="sh"; break ;;
             3)
+                local ssh_bin="/opt/bin/ssh"
+                [ ! -f "$ssh_bin" ] && ssh_bin="ssh"
                 prompt "Порт SSH [222 - Entware, 22 - Keenetic]: "
                 local port="${REPLY:-222}"
                 prompt "Пользователь [root]: "
                 local user="${REPLY:-root}"
-                # Максимально точное следование пункту 3: используем -tt, отключаем проверку ключей
-                TTYD_CMD_RESULT="ssh -tt -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p $port $user@localhost"
+                # Прямая команда без лишних флагов, пункт 3
+                TTYD_CMD_RESULT="$ssh_bin -tt -p $port $user@localhost"
                 break
                 ;;
             0) return 1 ;;
@@ -1352,18 +1354,14 @@ start_ttyd() {
     fuser -k ${port}/tcp >/dev/null 2>&1
     sleep 1
 
-    msg "Запуск ttyd..."
+    msg "Запуск: ttyd -W -a -i 0.0.0.0 -p $port $cmd"
 
     ttyd \
         -W \
         -a \
-        --max-clients 10 \
         -i 0.0.0.0 \
         -p "$port" \
-        -t titleFixed="Keenetic Terminal" \
-        -t fontSize=14 \
-        -t 'theme={"background":"#1e1e1e"}' \
-        -- $cmd \
+        $cmd \
         > "$log" 2>&1 &
 
     local pid=$!
