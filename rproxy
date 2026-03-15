@@ -3,7 +3,7 @@
 # Публикация локальных сервисов через SSH-туннели + nginx на VPS
 # https://github.com/l-ptrol/rProxy
 
-VERSION="2.0.0-Alpha.6"
+VERSION="2.0.0-Alpha.7"
 export PATH="/opt/bin:/opt/sbin:$PATH"
 CONF_DIR="/opt/etc/rproxy"
 CONF_FILE="$CONF_DIR/rproxy.conf"
@@ -489,7 +489,7 @@ build_ttyd_command_interactive() {
                 local port="${REPLY:-222}"
                 prompt "Пользователь [root]: "
                 local user="${REPLY:-root}"
-                # Прямая команда без лишних флагов, пункт 3
+                # Максимально простая и надежная команда
                 TTYD_CMD_RESULT="$ssh_bin -tt -p $port $user@localhost"
                 break
                 ;;
@@ -1356,25 +1356,25 @@ start_ttyd() {
 
     msg "Запуск: ttyd -W -a -i 0.0.0.0 -p $port $cmd"
 
-    ttyd \
-        -W \
-        -a \
-        -i 0.0.0.0 \
-        -p "$port" \
-        $cmd \
-        > "$log" 2>&1 &
-
+    # Используем eval для максимально точного соответствия терминальному вводу
+    eval "ttyd -W -a -i 0.0.0.0 -p $port $cmd >> \"$log\" 2>&1 &"
     local pid=$!
     echo "$pid" > "$pid_file"
 
-    sleep 1
+    # Даем ttyd чуть больше времени на инициализацию
+    sleep 2
 
     if kill -0 "$pid" 2>/dev/null; then
         msg "ttyd успешно запущен (PID $pid)"
         return 0
     else
-        err "Ошибка запуска ttyd"
-        cat "$log"
+        err "Ошибка запуска ttyd!"
+        if [ -s "$log" ]; then
+            printf "${YELLOW}Содержимое лога:${NC}\n"
+            cat "$log"
+        else
+            err "Лог пуст. Возможно, ttyd не найден или аргументы неверны."
+        fi
         return 1
     fi
 }
