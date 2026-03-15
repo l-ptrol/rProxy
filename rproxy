@@ -438,6 +438,17 @@ build_ttyd_command_interactive() {
 
 do_add_interactive() {
     local step=1
+    local name="" target="" mode="" domain="" ext_port="" use_ssl="no" vps_id="" 
+    local use_ndm_auth="no" htpasswd_line=""
+    local svc_type="http" # http, tcp, ttyd
+
+    while [ "$step" -gt 0 ]; do
+        clear_screen
+        draw_box "Добавить новый сервис (Шаг $step/8)"
+        printf "  ${DIM}Введите 0 на любом шаге для возврата назад${NC}\n\n"
+
+        case "$step" in
+            1)
                 prompt "Название сервиса (латиницей, без пробелов): "
                 [ "$REPLY" = "0" ] && return
                 name=$(echo "$REPLY" | tr '[:upper:]' '[:lower:]' | tr ' ' '_' | tr -cd '[:alnum:]_-')
