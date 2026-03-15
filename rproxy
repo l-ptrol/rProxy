@@ -3,7 +3,7 @@
 # Публикация локальных сервисов через SSH-туннели + nginx на VPS
 # https://github.com/l-ptrol/rProxy
 
-VERSION="1.9.3-Beta"
+VERSION="1.9.4-Beta"
 export PATH="/opt/bin:/opt/sbin:$PATH"
 CONF_DIR="/opt/etc/rproxy"
 CONF_FILE="$CONF_DIR/rproxy.conf"
@@ -497,6 +497,9 @@ do_add_interactive() {
                         svc_type="ttyd"
                         target="127.0.0.1:7681" # Дефолтный порт ttyd
                         msg "Будет использован встроенный ttyd (порт 7681)"
+                        prompt "Команда терминала [login]: "
+                        [ "$REPLY" = "0" ] && { step=2; continue; }
+                        ttyd_cmd="${REPLY:-login}"
                         sleep 1
                         ;;
                     *) warn "Неверный выбор"; pause; continue ;;
@@ -747,6 +750,7 @@ EOF
                     printf 'SVC_NDM_AUTH="%s"\n' "$use_ndm_auth"
                     printf "SVC_HTPASSWD='%s'\n" "$htpasswd_line"
                     printf 'SVC_TYPE="%s"\n' "$svc_type"
+                    [ -n "$ttyd_cmd" ] && printf 'SVC_TTYD_CMD="%s"\n' "$ttyd_cmd"
                     printf 'SVC_ENABLED="yes"\n'
                 } > "$SERVICES_DIR/$name.conf"
 
@@ -1016,8 +1020,15 @@ do_edit_interactive() {
             new_ext_port="${REPLY:-$SVC_EXT_PORT}"
         fi
 
+        local new_ttyd_cmd="$SVC_TTYD_CMD"
+        if [ "$SVC_TYPE" = "ttyd" ]; then
+            prompt "Новая команда терминала [${SVC_TTYD_CMD:-login}] (0 - назад): "
+            [ "$REPLY" = "0" ] && continue
+            new_ttyd_cmd="${REPLY:-${SVC_TTYD_CMD:-login}}"
+        fi
+
         # Если ничего не изменилось
-        if [ "$new_host" = "$SVC_TARGET_HOST" ] && [ "$new_port" = "$SVC_TARGET_PORT" ] && [ "$new_ext_port" = "$SVC_EXT_PORT" ]; then
+        if [ "$new_host" = "$SVC_TARGET_HOST" ] && [ "$new_port" = "$SVC_TARGET_PORT" ] && [ "$new_ext_port" = "$SVC_EXT_PORT" ] && [ "$new_ttyd_cmd" = "$SVC_TTYD_CMD" ]; then
             msg "Параметры не изменились."
             pause
             continue
@@ -1025,8 +1036,12 @@ do_edit_interactive() {
 
         printf "\n"
         draw_separator
-        printf "  ${DIM}Было:${NC}   $SVC_TARGET_HOST:$SVC_TARGET_PORT (внешний: $SVC_EXT_PORT)\n"
-        printf "  ${GREEN}Стало:${NC}  $new_host:$new_port (внешний: $new_ext_port)\n"
+        printf "  ${DIM}Было:${NC}   $SVC_TARGET_HOST:$SVC_TARGET_PORT (внешний: $SVC_EXT_PORT)"
+        [ "$SVC_TYPE" = "ttyd" ] && printf " [CMD: $SVC_TTYD_CMD]"
+        printf "\n"
+        printf "  ${GREEN}Стало:${NC}  $new_host:$new_port (внешний: $new_ext_port)"
+        [ "$SVC_TYPE" = "ttyd" ] && printf " [CMD: $new_ttyd_cmd]"
+        printf "\n"
         draw_separator
 
         prompt "Применить изменения? (д/н) [д]: "
@@ -1064,6 +1079,13 @@ do_edit_interactive() {
     sed -i "s/SVC_TARGET_HOST=.*/SVC_TARGET_HOST=\"$new_host\"/" "$SERVICES_DIR/$name.conf"
     sed -i "s/SVC_TARGET_PORT=.*/SVC_TARGET_PORT=\"$new_port\"/" "$SERVICES_DIR/$name.conf"
     sed -i "s/SVC_EXT_PORT=.*/SVC_EXT_PORT=\"$new_ext_port\"/" "$SERVICES_DIR/$name.conf"
+    if [ "$SVC_TYPE" = "ttyd" ]; then
+        if grep -q "SVC_TTYD_CMD=" "$SERVICES_DIR/$name.conf"; then
+            sed -i "s|SVC_TTYD_CMD=.*|SVC_TTYD_CMD=\"$new_ttyd_cmd\"|" "$SERVICES_DIR/$name.conf"
+        else
+            echo "SVC_TTYD_CMD=\"$new_ttyd_cmd\"" >> "$SERVICES_DIR/$name.conf"
+        fi
+    fi
 
     msg "Сервис '$name' обновлен"
     [ "$was_running" -eq 1 ] && do_start_service "$name"
@@ -1228,7 +1250,7 @@ do_start_service() {
             # Гарантируем, что порт свободен
             fuser -k 7681/tcp >/dev/null 2>&1 || pkill -x ttyd 2>/dev/null
             sleep 1
-            ttyd -p 7681 login >/dev/null 2>&1 &
+            ttyd -p 7681 ${SVC_TTYD_CMD:-login} >/dev/null 2>&1 &
         else
             err "Не удалось установить ttyd. Проверьте интернет или opkg."
         fi
@@ -1342,7 +1364,7 @@ do_stop_service() {
 
 _clear_svc_vars() {
     unset SVC_NAME SVC_VPS SVC_TARGET_HOST SVC_TARGET_PORT SVC_TUNNEL_PORT
-    unset SVC_EXT_PORT SVC_DOMAIN SVC_SSL SVC_NDM_AUTH SVC_HTPASSWD SVC_TYPE SVC_ENABLED
+    unset SVC_EXT_PORT SVC_DOMAIN SVC_SSL SVC_NDM_AUTH SVC_HTPASSWD SVC_TYPE SVC_TTYD_CMD SVC_ENABLED
 }
 
 load_service() {
