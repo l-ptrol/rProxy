@@ -3,7 +3,7 @@
 # Публикация локальных сервисов через SSH-туннели + nginx на VPS
 # https://github.com/l-ptrol/rProxy
 
-VERSION="1.9.7-Beta.7"
+VERSION="1.9.7-Beta.8"
 export PATH="/opt/bin:/opt/sbin:$PATH"
 CONF_DIR="/opt/etc/rproxy"
 CONF_FILE="$CONF_DIR/rproxy.conf"
@@ -467,7 +467,7 @@ build_ttyd_command_interactive() {
                 local port="${REPLY:-222}"
                 prompt "Пользователь [root]: "
                 local user="${REPLY:-root}"
-                TTYD_CMD_RESULT="ssh -tt -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p $port $user@localhost"
+                TTYD_CMD_RESULT="ssh -4 -tt -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o RequestTTY=force -p $port $user@localhost"
                 break
                 ;;
             0) return 1 ;;
@@ -1301,9 +1301,9 @@ do_start_service() {
             local cmd="${SVC_TTYD_CMD:-login}"
             msg "Команда терминала: ${CYAN}$cmd${NC}"
             
-            # Запускаем ttyd с логированием ошибок и поддержкой ввода (-W)
-            # Принудительно биндим на 0.0.0.0 и заводим переменные окружения
-            export TERM=xterm
+            # Заводим переменные окружения для корректной работы терминала
+            export TERMINFO=/opt/share/terminfo
+            export TERM=xterm-256color
             export HOME=/root
             export USER=root
             export LD_LIBRARY_PATH="/opt/lib:/opt/usr/lib:$LD_LIBRARY_PATH"
@@ -1314,8 +1314,9 @@ do_start_service() {
             sleep 1
             
             # -a (Allow Anyone) отключает проверку Origin
-            msg "Запуск: ttyd -W -a -i 0.0.0.0 -p 7681 sh -c \"$cmd\""
-            ttyd -W -a -i 0.0.0.0 -p 7681 sh -c "$cmd" >/tmp/rproxy_ttyd.log 2>&1 &
+            # Убираем sh -c для прямого запуска команд (фиксит проблемы с PTY)
+            msg "Запуск: ttyd -W -a -i 0.0.0.0 -p 7681 $cmd"
+            eval "ttyd -W -a -i 0.0.0.0 -p 7681 $cmd" >/tmp/rproxy_ttyd.log 2>&1 &
         else
             err "Не удалось установить ttyd. Проверьте интернет или opkg."
         fi
@@ -1538,8 +1539,8 @@ server {
         proxy_set_header X-Forwarded-Proto \$scheme;
         proxy_cookie_domain "$t_host" "\$host";
         proxy_set_header Origin "";
-        proxy_read_timeout 3600s;
-        proxy_send_timeout 3600s;
+        proxy_read_timeout 7d;
+        proxy_send_timeout 7d;
     }
 }
 NGINXEOF
@@ -1573,8 +1574,8 @@ server {
         proxy_set_header X-Forwarded-Proto \$scheme;
         proxy_cookie_domain "$t_host" "\$host";
         proxy_set_header Origin "";
-        proxy_read_timeout 3600s;
-        proxy_send_timeout 3600s;
+        proxy_read_timeout 7d;
+        proxy_send_timeout 7d;
     }
 }
 NGINXEOF
@@ -1596,8 +1597,8 @@ server {
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
         proxy_cookie_domain "$t_host" "\$host";
-        proxy_read_timeout 3600s;
-        proxy_send_timeout 3600s;
+        proxy_read_timeout 7d;
+        proxy_send_timeout 7d;
     }
 }
 NGINXEOF
