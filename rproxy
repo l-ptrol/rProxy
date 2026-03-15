@@ -3,7 +3,7 @@
 # Публикация локальных сервисов через SSH-туннели + nginx на VPS
 # https://github.com/l-ptrol/rProxy
 
-VERSION="2.0.0-Alpha.4"
+VERSION="2.0.0-Alpha.5"
 export PATH="/opt/bin:/opt/sbin:$PATH"
 CONF_DIR="/opt/etc/rproxy"
 CONF_FILE="$CONF_DIR/rproxy.conf"
@@ -483,11 +483,12 @@ build_ttyd_command_interactive() {
             1) TTYD_CMD_RESULT="login"; break ;;
             2) TTYD_CMD_RESULT="sh"; break ;;
             3)
-                prompt "Порт SSH [222 - Entware, 22 - Kinetic]: "
+                prompt "Порт SSH [222 - Entware, 22 - Keenetic]: "
                 local port="${REPLY:-222}"
                 prompt "Пользователь [root]: "
                 local user="${REPLY:-root}"
-                TTYD_CMD_RESULT="ssh -4 -tt -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o RequestTTY=force -p $port $user@localhost"
+                # Максимально точное следование пункту 3: используем -tt, отключаем проверку ключей
+                TTYD_CMD_RESULT="ssh -tt -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p $port $user@localhost"
                 break
                 ;;
             0) return 1 ;;
