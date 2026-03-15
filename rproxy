@@ -3,8 +3,7 @@
 # Публикация локальных сервисов через SSH-туннели + nginx на VPS
 # https://github.com/l-ptrol/rProxy
 
-VERSION="1.8.4-Beta" # Было 1.8.4-Beta, исправляем ошибку
-VERSION="1.8.5-Beta"
+VERSION="1.8.6-Beta"
 export PATH="/opt/bin:/opt/sbin:$PATH"
 CONF_DIR="/opt/etc/rproxy"
 CONF_FILE="$CONF_DIR/rproxy.conf"
