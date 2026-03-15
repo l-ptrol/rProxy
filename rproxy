@@ -3,7 +3,7 @@
 # Публикация локальных сервисов через SSH-туннели + nginx на VPS
 # https://github.com/l-ptrol/rProxy
 
-VERSION="1.6.8"
+VERSION="1.6.8-Beta"
 export PATH="/opt/bin:/opt/sbin:$PATH"
 CONF_DIR="/opt/etc/rproxy"
 CONF_FILE="$CONF_DIR/rproxy.conf"
@@ -509,20 +509,27 @@ do_add_interactive() {
                         continue
                     fi
                     
+                    ext_port=443
+                    prompt "Внешний порт [$ext_port]: "
+                    [ "$REPLY" = "0" ] && { step=4; continue; }
+                    ext_port="${REPLY:-$ext_port}"
+
                     local conflict=""
                     for f in "$SERVICES_DIR"/*.conf; do
                         [ -f "$f" ] || continue
-                        if grep -q "SVC_DOMAIN=\"$domain\"" "$f"; then
+                        local c_domain=$(grep "SVC_DOMAIN=" "$f" | cut -d'"' -f2)
+                        local c_port=$(grep "SVC_EXT_PORT=" "$f" | cut -d'"' -f2)
+                        if [ "$c_domain" = "$domain" ] && [ "$c_port" = "$ext_port" ]; then
                             conflict=$(basename "$f" .conf)
                             break
                         fi
                     done
                     
                     if [ -n "$conflict" ]; then
-                        err "Домен '$domain' уже используется сервисом '$conflict'"
+                        err "Домен '$domain' на порту '$ext_port' уже используется сервисом '$conflict'"
                         pause
                     else
-                        use_ssl="yes"; ext_port=443
+                        use_ssl="yes"
                         if [ -z "$CERTBOT_EMAIL" ]; then
                             prompt "Введите Email для Certbot: "
                             [ "$REPLY" = "0" ] && continue # Переспросит домен
@@ -718,7 +725,6 @@ do_ssl_interactive() {
         msg "SSL сертификат успешно получен!"
         # Обновляем конфиг сервиса
         sed -i "s/SVC_SSL=.*/SVC_SSL=\"yes\"/" "$SERVICES_DIR/$name.conf"
-        sed -i "s/SVC_EXT_PORT=.*/SVC_EXT_PORT=\"443\"/" "$SERVICES_DIR/$name.conf"
         
         # Проверка автопродления (добавляем таймер/крон если нет)
         ssh_cmd "systemctl is-active certbot.timer >/dev/null 2>&1 || (crontab -l 2>/dev/null | grep -q certbot || (crontab -l 2>/dev/null; echo \"0 0,12 * * * certbot renew -q\") | crontab -)"
@@ -905,8 +911,15 @@ do_edit_interactive() {
             new_host="127.0.0.1"
         fi
 
+        local new_ext_port="$SVC_EXT_PORT"
+        if [ -n "$SVC_DOMAIN" ]; then
+            prompt "Новый внешний порт [$SVC_EXT_PORT] (0 - назад): "
+            [ "$REPLY" = "0" ] && continue
+            new_ext_port="${REPLY:-$SVC_EXT_PORT}"
+        fi
+
         # Если ничего не изменилось
-        if [ "$new_host" = "$SVC_TARGET_HOST" ] && [ "$new_port" = "$SVC_TARGET_PORT" ]; then
+        if [ "$new_host" = "$SVC_TARGET_HOST" ] && [ "$new_port" = "$SVC_TARGET_PORT" ] && [ "$new_ext_port" = "$SVC_EXT_PORT" ]; then
             msg "Параметры не изменились."
             pause
             continue
@@ -914,8 +927,8 @@ do_edit_interactive() {
 
         printf "\n"
         draw_separator
-        printf "  ${DIM}Было:${NC}   $SVC_TARGET_HOST:$SVC_TARGET_PORT\n"
-        printf "  ${GREEN}Стало:${NC}  $new_host:$new_port\n"
+        printf "  ${DIM}Было:${NC}   $SVC_TARGET_HOST:$SVC_TARGET_PORT (внешний: $SVC_EXT_PORT)\n"
+        printf "  ${GREEN}Стало:${NC}  $new_host:$new_port (внешний: $new_ext_port)\n"
         draw_separator
 
         prompt "Применить изменения? (д/н) [д]: "
@@ -938,6 +951,7 @@ do_edit_interactive() {
     # Обновить локальный конфиг сервиса
     sed -i "s|SVC_TARGET_HOST=\".*\"|SVC_TARGET_HOST=\"$new_host\"|" "$SERVICES_DIR/$name.conf"
     sed -i "s|SVC_TARGET_PORT=\".*\"|SVC_TARGET_PORT=\"$new_port\"|" "$SERVICES_DIR/$name.conf"
+    sed -i "s|SVC_EXT_PORT=\".*\"|SVC_EXT_PORT=\"$new_ext_port\"|" "$SERVICES_DIR/$name.conf"
 
     # Перезагружаем переменные для деплоя
     load_service "$name"
@@ -1199,6 +1213,10 @@ generate_nginx_conf() {
     local use_ndm_auth="$7"
     local target_file="$8"
 
+    # Загружаем SSL статус
+    local use_ssl="no"
+    [ -f "$SERVICES_DIR/$name.conf" ] && use_ssl=$(grep "SVC_SSL=" "$SERVICES_DIR/$name.conf" | cut -d'"' -f2)
+
     local stealth_host="$t_host"
     [ "$t_port" != "80" ] && stealth_host="$t_host:$t_port"
     
@@ -1211,9 +1229,20 @@ generate_nginx_conf() {
     fi
 
     if [ -n "$domain" ]; then
+        local listen_opts="$ext_port"
+        local proto="http"
+        if [ "$use_ssl" = "yes" ]; then
+            listen_opts="$ext_port ssl"
+            proto="https"
+        fi
+        
+        # Для корректного Host заголовка
+        local host_header="$domain"
+        [ "$ext_port" != "80" ] && [ "$ext_port" != "443" ] && host_header="$domain:$ext_port"
+
         cat > "$target_file" << NGINXEOF
 server {
-    listen 80;
+    listen $listen_opts;
     server_name "$domain";
     proxy_buffering off;
     proxy_request_buffering off;
@@ -1223,9 +1252,9 @@ server {
         proxy_http_version 1.1;
         proxy_set_header Upgrade \$http_upgrade;
         proxy_set_header Connection "upgrade";
-        proxy_set_header Host "$stealth_host";
-        proxy_set_header Origin "http://$stealth_host";
-        proxy_set_header Referer "http://$stealth_host/";
+        proxy_set_header Host "$host_header";
+        proxy_set_header Origin "$proto://$host_header";
+        proxy_set_header Referer "$proto://$host_header/";
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto \$scheme;
