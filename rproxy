@@ -3,7 +3,7 @@
 # Публикация локальных сервисов через SSH-туннели + nginx на VPS
 # https://github.com/l-ptrol/rProxy
 
-VERSION="1.9.4-Beta"
+VERSION="1.9.5-Beta"
 export PATH="/opt/bin:/opt/sbin:$PATH"
 CONF_DIR="/opt/etc/rproxy"
 CONF_FILE="$CONF_DIR/rproxy.conf"
@@ -1247,10 +1247,16 @@ do_start_service() {
         
         if command -v ttyd >/dev/null 2>&1; then
             msg "Запускаю ttyd на порту 7681..."
-            # Гарантируем, что порт свободен
-            fuser -k 7681/tcp >/dev/null 2>&1 || pkill -x ttyd 2>/dev/null
+            local cmd="${SVC_TTYD_CMD:-login}"
+            msg "Команда терминала: ${CYAN}$cmd${NC}"
+            
+            # Гарантируем, что порт свободен (убиваем по паттерну)
+            pkill -9 -f "ttyd.*-p 7681" >/dev/null 2>&1
+            fuser -k 7681/tcp >/dev/null 2>&1
             sleep 1
-            ttyd -p 7681 ${SVC_TTYD_CMD:-login} >/dev/null 2>&1 &
+            
+            # Запускаем ttyd с логированием ошибок
+            ttyd -p 7681 $cmd >/tmp/rproxy_ttyd.log 2>&1 &
         else
             err "Не удалось установить ttyd. Проверьте интернет или opkg."
         fi
