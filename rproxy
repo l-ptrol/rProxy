@@ -3,7 +3,7 @@
 # Публикация локальных сервисов через SSH-туннели + nginx на VPS
 # https://github.com/l-ptrol/rProxy
 
-VERSION="1.6.8-Beta"
+VERSION="1.6.9-Beta"
 export PATH="/opt/bin:/opt/sbin:$PATH"
 CONF_DIR="/opt/etc/rproxy"
 CONF_FILE="$CONF_DIR/rproxy.conf"
@@ -1229,16 +1229,13 @@ generate_nginx_conf() {
     fi
 
     if [ -n "$domain" ]; then
-        local listen_opts="$ext_port"
-        local proto="http"
-        if [ "$use_ssl" = "yes" ]; then
-            listen_opts="$ext_port ssl"
-            proto="https"
-        fi
+        # Для доменов всегда сначала создаем конфиг на 80 порту. 
+        # Certbot сам добавит listen 443 ssl и настройки сертификатов.
+        local listen_opts="80"
         
-        # Для корректного Host заголовка
-        local host_header="$domain"
-        [ "$ext_port" != "80" ] && [ "$ext_port" != "443" ] && host_header="$domain:$ext_port"
+        # Если порт не стандартный (не 80 и не 443), то Certbot может не сработать автоматом на установку,
+        # но для начала нам нужно избежать дубликата 443.
+        [ "$ext_port" != "80" ] && [ "$ext_port" != "443" ] && listen_opts="$ext_port"
 
         cat > "$target_file" << NGINXEOF
 server {
@@ -1252,9 +1249,7 @@ server {
         proxy_http_version 1.1;
         proxy_set_header Upgrade \$http_upgrade;
         proxy_set_header Connection "upgrade";
-        proxy_set_header Host "$host_header";
-        proxy_set_header Origin "$proto://$host_header";
-        proxy_set_header Referer "$proto://$host_header/";
+        proxy_set_header Host \$host;
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto \$scheme;
