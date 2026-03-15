@@ -3,7 +3,7 @@
 # Публикация локальных сервисов через SSH-туннели + nginx на VPS
 # https://github.com/l-ptrol/rProxy
 
-VERSION="1.9.5-Beta"
+VERSION="1.9.6-Beta"
 export PATH="/opt/bin:/opt/sbin:$PATH"
 CONF_DIR="/opt/etc/rproxy"
 CONF_FILE="$CONF_DIR/rproxy.conf"
@@ -443,6 +443,43 @@ select_vps_interactive() {
     done
 }
 
+build_ttyd_command_interactive() {
+    local current_cmd="$1"
+    local final_cmd=""
+    
+    while true; do
+        clear_screen
+        draw_box "Конструктор команды терминала"
+        [ -n "$current_cmd" ] && printf "  Текущая команда: ${CYAN}%s${NC}\n\n" "$current_cmd"
+        
+        printf "  Выберите тип подключения:\n"
+        printf "  ${BOLD}1)${NC}  Системный вход (login) — стандарт роутера\n"
+        printf "  ${BOLD}2)${NC}  Оболочка (sh) — прямой вход без пароля\n"
+        printf "  ${BOLD}3)${NC}  SSH — подключение к себе на роутер (выбор порта)\n"
+        printf "  ${BOLD}0)${NC}  Отмена\n"
+        
+        prompt "Ваш выбор: "
+        case "$REPLY" in
+            1) final_cmd="login"; break ;;
+            2) final_cmd="sh"; break ;;
+            3)
+                prompt "Порт SSH [222 - Entware, 22 - Kinetic]: "
+                local port="${REPLY:-222}"
+                prompt "Пользователь [root]: "
+                local user="${REPLY:-root}"
+                final_cmd="ssh -p $port $user@localhost"
+                break
+                ;;
+            0) return 1 ;;
+            *) warn "Неверный выбор" ;;
+        esac
+    done
+    
+    echo "$final_cmd"
+    return 0
+}
+
+
 # ══════════════════════════════════════════════════════════════════════
 # ДОБАВИТЬ СЕРВИС (интерактивно)
 # ══════════════════════════════════════════════════════════════════════
@@ -497,9 +534,8 @@ do_add_interactive() {
                         svc_type="ttyd"
                         target="127.0.0.1:7681" # Дефолтный порт ttyd
                         msg "Будет использован встроенный ttyd (порт 7681)"
-                        prompt "Команда терминала [login]: "
-                        [ "$REPLY" = "0" ] && { step=2; continue; }
-                        ttyd_cmd="${REPLY:-login}"
+                        ttyd_cmd=$(build_ttyd_command_interactive)
+                        [ -z "$ttyd_cmd" ] && { step=2; continue; }
                         sleep 1
                         ;;
                     *) warn "Неверный выбор"; pause; continue ;;
@@ -1022,9 +1058,8 @@ do_edit_interactive() {
 
         local new_ttyd_cmd="$SVC_TTYD_CMD"
         if [ "$SVC_TYPE" = "ttyd" ]; then
-            prompt "Новая команда терминала [${SVC_TTYD_CMD:-login}] (0 - назад): "
-            [ "$REPLY" = "0" ] && continue
-            new_ttyd_cmd="${REPLY:-${SVC_TTYD_CMD:-login}}"
+            new_ttyd_cmd=$(build_ttyd_command_interactive "$SVC_TTYD_CMD")
+            [ -z "$new_ttyd_cmd" ] && continue
         fi
 
         # Если ничего не изменилось
