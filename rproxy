@@ -3,7 +3,7 @@
 # Публикация локальных сервисов через SSH-туннели + nginx на VPS
 # https://github.com/l-ptrol/rProxy
 
-VERSION="2.0.0-Alpha.17"
+VERSION="2.0.0-Alpha.18"
 export PATH="/opt/bin:/opt/sbin:$PATH"
 CONF_DIR="/opt/etc/rproxy"
 CONF_FILE="$CONF_DIR/rproxy.conf"
@@ -1368,40 +1368,32 @@ start_ttyd() {
     mkdir -p /opt/var/run/rproxy
 
     # 1️⃣ Переменные окружения (подготовка для env -i)
+    # LD_LIBRARY_PATH удален, так как он вызывает Segfault в Entware
     local e_term="TERM=xterm-256color"
     local e_home="HOME=/root"
     local e_user="USER=root"
     local e_shell="SHELL=/bin/sh"
     local e_path="PATH=/opt/bin:/opt/sbin:/usr/bin:/bin"
-    local e_ld="LD_LIBRARY_PATH=/opt/lib:/opt/usr/lib"
 
-    # 2️⃣ Очистка
-    [ -f "$pid_file" ] && { kill "$(cat "$pid_file")" 2>/dev/null; rm -f "$pid_file"; }
+    # 2️⃣ Агрессивная очистка
+    [ -f "$pid_file" ] && { kill -TERM "$(cat "$pid_file")" 2>/dev/null; rm -f "$pid_file"; }
     
-    for i in 1 2 3; do
-        if _is_port_busy "$port"; then
-            msg "Порт $port занят — освобождение..."
-            fuser -k ${port}/tcp >/dev/null 2>&1
-            pkill -9 -f "ttyd.*-p $port" >/dev/null 2>&1
-            sleep 1
-        else
-            break
-        fi
-    done
+    # Убиваем все старые процессы ttyd на этом порту и возможные зависшие Watchdog
+    pkill -9 -f "ttyd.*-p $port" >/dev/null 2>&1
+    fuser -k ${port}/tcp >/dev/null 2>&1
+    sleep 1
 
     # 3️⃣ Watchdog Launcher
     (
-        # Внутри подпанциря подписываемся на сигнал завершения
         trap 'exit 0' TERM INT
         
         while true; do
             if [ -x "$ttyd_bin" ]; then
-                # Тщательный запуск. Если setsid нет, вызываем напрямую.
                 if [ -n "$setsid_bin" ]; then
-                    env -i "$e_term" "$e_home" "$e_user" "$e_shell" "$e_path" "$e_ld" \
+                    env -i "$e_term" "$e_home" "$e_user" "$e_shell" "$e_path" \
                         "$setsid_bin" "$ttyd_bin" -W -a --max-clients 10 -i 0.0.0.0 -p "$port" $cmd >> "$log" 2>&1
                 else
-                    env -i "$e_term" "$e_home" "$e_user" "$e_shell" "$e_path" "$e_ld" \
+                    env -i "$e_term" "$e_home" "$e_user" "$e_shell" "$e_path" \
                         "$ttyd_bin" -W -a --max-clients 10 -i 0.0.0.0 -p "$port" $cmd >> "$log" 2>&1
                 fi
             else
