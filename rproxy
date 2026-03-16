@@ -3,7 +3,7 @@
 # Публикация локальных сервисов через SSH-туннели + nginx на VPS
 # https://github.com/l-ptrol/rProxy
 
-VERSION="2.0.0-Alpha.45"
+VERSION="2.0.0-Alpha.45.1"
 export PATH="/opt/bin:/opt/sbin:$PATH"
 CONF_DIR="/opt/etc/rproxy"
 CONF_FILE="$CONF_DIR/rproxy.conf"
@@ -1632,7 +1632,9 @@ do_start_service() {
     # Режим динамической авторизации удален для упрощения.
     
     # Мониторинг порт для autossh (20000 + случайное число)
-    local mon_port=$((20000 + RANDOM % 1000))
+    # Мониторинг порт для autossh (20000 + случайное число)
+    # В /bin/sh нет $RANDOM, используем awk для генерации
+    local mon_port=$((20000 + $(awk 'BEGIN{srand(); print int(rand()*1000)}')))
 
     if [ "$VPS_AUTH" = "password" ]; then
         AUTOSSH_GATETIME=0 sshpass -p "$VPS_PASS" autossh -M "$mon_port" -f -N \
@@ -1730,7 +1732,7 @@ do_stop_service() {
 
 _clear_svc_vars() {
     unset SVC_NAME SVC_VPS SVC_TARGET_HOST SVC_TARGET_PORT SVC_TUNNEL_PORT
-    unset SVC_EXT_PORT SVC_DOMAIN SVC_SSL SVC_NDM_AUTH SVC_HTPASSWD SVC_TYPE SVC_TTYD_CMD SVC_ENABLED
+    unset SVC_EXT_PORT SVC_DOMAIN SVC_SSL SVC_NDM_AUTH SVC_HTPASSWD SVC_TYPE SVC_TTYD_CMD SVC_ENABLED SVC_TTYD_PORT
 }
 
 load_service() {
@@ -1947,9 +1949,11 @@ do_setup() {
             VPS_HOST="" # Сброс перед загрузкой
             . "$f"
             local v_info="${DIM}${VPS_USER}@${VPS_HOST}:${VPS_PORT}${NC}"
+            v_info="${GREEN}root@$VPS_HOST:$VPS_PORT${NC}"
             [ -z "$VPS_HOST" ] && v_info="${RED}Не настроен${NC}"
             printf "  ${BOLD}%d)${NC}  %-14s %b\n" "$idx" "$(basename "$f" .conf)" "$v_info"
-            vps_list="$vps_list $(basename "$f" .conf)"
+            local v_name=$(basename "$f" .conf)
+            [ -z "$vps_list" ] && vps_list="$v_name" || vps_list="$vps_list $v_name"
         done
 
         if [ "$idx" -eq 0 ]; then
