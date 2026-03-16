@@ -3,7 +3,7 @@
 # Публикация локальных сервисов через SSH-туннели + nginx на VPS
 # https://github.com/l-ptrol/rProxy
 
-VERSION="2.0.0-Alpha.36"
+VERSION="2.0.0-Alpha.37"
 export PATH="/opt/bin:/opt/sbin:$PATH"
 CONF_DIR="/opt/etc/rproxy"
 CONF_FILE="$CONF_DIR/rproxy.conf"
@@ -669,44 +669,17 @@ build_ttyd_command_interactive() {
     while true; do
         clear_screen
         draw_box "Конструктор команды терминала"
-        [ -n "$current_cmd" ] && printf "  Текущая команда: ${CYAN}%s${NC}\n\n" "$current_cmd"
+        [ -n "$current_cmd" ] && printf "  Текущая команда: ${CYAN}%s${NC}\n\n" "$(mask_and_escape "$current_cmd")"
         
-        printf "  Выберите тип подключения:\n"
-        printf "  ${BOLD}1)${NC}  Системный вход (login) — оболочка роутера\n"
-        printf "  ${BOLD}2)${NC}  Прямая оболочка (sh) — без пароля\n"
-        printf "  ${BOLD}3)${NC}  Keenetic CLI (Порт 79) — командная строка ОС\n"
+        printf "  Выберите тип терминала:\n"
+        printf "  ${BOLD}1)${NC}  Системный вход (login) — Linux Shell\n"
+        printf "  ${BOLD}2)${NC}  Keenetic CLI (Порт 79) — Командная строка ОС\n"
         printf "  ${BOLD}0)${NC}  Отмена\n"
         
         prompt "Ваш выбор: "
         case "$REPLY" in
-            1) 
-                if [ "$has_expect" -eq 1 ] && [ -n "$DEFAULT_AUTH_USER" ] && [ -n "$DEFAULT_AUTH_PASS" ]; then
-                    prompt "Включить авто-вход (expect)? (д/н) [д]: "
-                    if [ "${REPLY:-д}" = "д" ]; then
-                        TTYD_CMD_RESULT="expect -c 'spawn login; expect \"Login:\" { send \"$DEFAULT_AUTH_USER\\r\" }; expect \"Password:\" { send \"$DEFAULT_AUTH_PASS\\r\" }; interact'"
-                        msg "Автоматический вход (expect) включен."
-                    else
-                        TTYD_CMD_RESULT="login"
-                    fi
-                else
-                    TTYD_CMD_RESULT="login"
-                fi
-                break ;;
-            2) TTYD_CMD_RESULT="sh"; break ;;
-            3)
-                if [ "$has_expect" -eq 1 ] && [ -n "$DEFAULT_AUTH_USER" ] && [ -n "$DEFAULT_AUTH_PASS" ]; then
-                    prompt "Включить авто-вход в CLI? (д/н) [д]: "
-                    if [ "${REPLY:-д}" = "д" ]; then
-                        TTYD_CMD_RESULT="expect -c 'spawn telnet 127.0.0.1 79; expect \"Login:\" { send \"$DEFAULT_AUTH_USER\\r\" }; expect \"Password:\" { send \"$DEFAULT_AUTH_PASS\\r\" }; interact'"
-                        msg "Автоматический вход в CLI включен."
-                    else
-                        TTYD_CMD_RESULT="telnet 127.0.0.1 79"
-                    fi
-                else
-                    TTYD_CMD_RESULT="telnet 127.0.0.1 79"
-                    [ "$has_expect" -eq 0 ] && warn "Совет: установите 'expect' (opkg install expect) для авто-входа." && pause
-                fi
-                break ;;
+            1) TTYD_CMD_RESULT="login"; break ;;
+            2) TTYD_CMD_RESULT="telnet 127.0.0.1 79"; break ;;
             0) return 1 ;;
             *) warn "Неверный выбор" ;;
         esac
