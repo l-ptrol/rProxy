@@ -3,7 +3,7 @@
 # Публикация локальных сервисов через SSH-туннели + nginx на VPS
 # https://github.com/l-ptrol/rProxy
 
-VERSION="2.0.0-Alpha.28"
+VERSION="2.0.0-Alpha.29"
 export PATH="/opt/bin:/opt/sbin:$PATH"
 CONF_DIR="/opt/etc/rproxy"
 CONF_FILE="$CONF_DIR/rproxy.conf"
@@ -239,37 +239,13 @@ gen_htpasswd() {
     fi
 }
 
-get_user_system_hash() {
-    local user="$1"
-    [ -z "$user" ] && return 1
-    
-    local files="/etc/shadow /etc/passwd /opt/etc/passwd"
-    for f in $files; do
-        if [ -f "$f" ] && [ -r "$f" ]; then
-            # Извлекаем второе поле, ограничиваемся одной строкой, убираем возможные пробелы
-            local hash=$(grep -m 1 "^${user}:" "$f" | cut -d: -f2 | tr -d '[:space:]')
-            # Хеш обычно начинается с $ (например $1$, $6$, $apr1$)
-            # Игнорируем заглушки типа 'x', '*', '!', '!!'
-            if echo "$hash" | grep -q '^\$'; then
-                echo "$hash"
-                return 0
-            fi
-        fi
-    done
-    return 1
-}
-
 select_auth_interactive() {
     local default_user="${DEFAULT_AUTH_USER:-admin}"
     local default_pass="${DEFAULT_AUTH_PASS}"
     
-    # Собираем список кандидатов (root + результат ndmq)
-    local raw_admins="root $(ndmq -p "show admins" 2>/dev/null | grep -E "admin:" | awk '{print $1}' | sed 's/://')"
-    local system_admins=""
-    for adm in $raw_admins; do
-        # Убираем дубликаты
-        echo "$system_admins" | grep -q "\<$adm\>" || system_admins="$system_admins $adm"
-    done
+    # Пытаемся найти системных админов через ndmq
+    local system_admins=$(ndmq -p "show admins" 2>/dev/null | grep -E "admin:" | awk '{print $1}' | sed 's/://' | tr '\n' ' ')
+    [ -z "$system_admins" ] && system_admins="admin"
 
     while true; do
         clear_screen
@@ -277,27 +253,15 @@ select_auth_interactive() {
         printf "  Выберите данные для защиты сервиса:\n\n"
         
         local idx=1
-        # Очищаем переменные
-        for i in 1 2 3 4 5 6 7 8 9; do
-            eval "item_$i=\"\""
-            eval "item_hash_$i=\"\""
-        done
-        
         for adm in $system_admins; do
-            [ "$idx" -gt 7 ] && break
-            local hash=$(get_user_system_hash "$adm")
-            if [ -n "$hash" ]; then
-                printf "  ${BOLD}%d)${NC}  Системный вход: ${CYAN}%s${NC} ${GREEN}(автоматически)${NC}\n" "$idx" "$adm"
-                eval "item_hash_$idx=\"$hash\""
-            else
-                printf "  ${BOLD}%d)${NC}  Системный вход: ${CYAN}%s${NC}\n" "$idx" "$adm"
-            fi
+            [ "$idx" -gt 5 ] && break
+            printf "  ${BOLD}%d)${NC}  Системный администратор: ${CYAN}%s${NC}\n" "$idx" "$adm"
             eval "item_$idx=\"$adm\""
             idx=$((idx + 1))
         done
         
         if [ -n "$DEFAULT_AUTH_USER" ]; then
-            printf "  ${BOLD}%d)${NC}  Стандартные данные rproxy: ${CYAN}%s${NC} ${GREEN}(из конфига)${NC}\n" "$idx" "$DEFAULT_AUTH_USER"
+            printf "  ${BOLD}%d)${NC}  Стандартные данные rproxy: ${CYAN}%s${NC}\n" "$idx" "$DEFAULT_AUTH_USER"
             eval "item_$idx=\"DEFAULT_AUTH\""
             idx=$((idx + 1))
         fi
@@ -311,13 +275,12 @@ select_auth_interactive() {
         [ "$REPLY" = "0" ] && { AUTH_RESULT_ENABLED="no"; AUTH_RESULT_HTPASSWD=""; return 0; }
         
         local choice="$REPLY"
-        local type="" pre_hash=""
+        local type=""
         eval "type=\$item_$choice"
-        eval "pre_hash=\$item_hash_$choice"
         
         if [ -z "$type" ]; then warn "Неверный выбор"; pause; continue; fi
         
-        local user="" pass="" pass_hash=""
+        local user="" pass=""
         
         case "$type" in
             CUSTOM)
@@ -334,22 +297,14 @@ select_auth_interactive() {
                 ;;
             *)
                 user="$type"
-                if [ -n "$pre_hash" ]; then
-                    pass_hash="$pre_hash"
-                else
-                    prompt "Введите пароль для системного пользователя '$user': "
-                    pass="$REPLY"
-                    [ -z "$pass" ] && { warn "Пароль не может быть пустым"; pause; continue; }
-                fi
+                prompt "Введите пароль для пользователя '$user': "
+                pass="$REPLY"
+                [ -z "$pass" ] && { warn "Пароль не может быть пустым"; pause; continue; }
                 ;;
         esac
         
         AUTH_RESULT_ENABLED="yes"
-        if [ -n "$pass_hash" ]; then
-            AUTH_RESULT_HTPASSWD="$user:$pass_hash"
-        else
-            AUTH_RESULT_HTPASSWD=$(gen_htpasswd "$user" "$pass")
-        fi
+        AUTH_RESULT_HTPASSWD=$(gen_htpasswd "$user" "$pass")
         AUTH_RESULT_USER="$user"
         return 0
     done
@@ -617,20 +572,48 @@ build_ttyd_command_interactive() {
     local current_cmd="$1"
     TTYD_CMD_RESULT=""
     
+    local has_expect=0
+    [ -x "/opt/bin/expect" ] && has_expect=1
+
     while true; do
         clear_screen
         draw_box "Конструктор команды терминала"
         [ -n "$current_cmd" ] && printf "  Текущая команда: ${CYAN}%s${NC}\n\n" "$current_cmd"
         
         printf "  Выберите тип подключения:\n"
-        printf "  ${BOLD}1)${NC}  Системный вход (login) — стандарт роутера\n"
-        printf "  ${BOLD}2)${NC}  Оболочка (sh) — прямой вход без пароля\n"
+        printf "  ${BOLD}1)${NC}  Системный вход (login) — оболочка роутера\n"
+        printf "  ${BOLD}2)${NC}  Прямая оболочка (sh) — без пароля\n"
+        printf "  ${BOLD}3)${NC}  Keenetic CLI (Порт 79) — командная строка ОС\n"
         printf "  ${BOLD}0)${NC}  Отмена\n"
         
         prompt "Ваш выбор: "
         case "$REPLY" in
-            1) TTYD_CMD_RESULT="login"; break ;;
+            1) 
+                if [ "$has_expect" -eq 1 ] && [ -n "$DEFAULT_AUTH_USER" ] && [ -n "$DEFAULT_AUTH_PASS" ]; then
+                    prompt "Включить авто-вход (expect)? (д/н) [д]: "
+                    if [ "${REPLY:-д}" = "д" ]; then
+                        TTYD_CMD_RESULT="expect -c 'spawn login; expect \"Login:\" { send \"$DEFAULT_AUTH_USER\\r\" }; expect \"Password:\" { send \"$DEFAULT_AUTH_PASS\\r\" }; interact'"
+                    else
+                        TTYD_CMD_RESULT="login"
+                    fi
+                else
+                    TTYD_CMD_RESULT="login"
+                fi
+                break ;;
             2) TTYD_CMD_RESULT="sh"; break ;;
+            3)
+                if [ "$has_expect" -eq 1 ] && [ -n "$DEFAULT_AUTH_USER" ] && [ -n "$DEFAULT_AUTH_PASS" ]; then
+                    prompt "Включить авто-вход в CLI? (д/н) [д]: "
+                    if [ "${REPLY:-д}" = "д" ]; then
+                        TTYD_CMD_RESULT="expect -c 'spawn telnet 127.0.0.1 79; expect \"Login:\" { send \"$DEFAULT_AUTH_USER\\r\" }; expect \"Password:\" { send \"$DEFAULT_AUTH_PASS\\r\" }; interact'"
+                    else
+                        TTYD_CMD_RESULT="telnet 127.0.0.1 79"
+                    fi
+                else
+                    TTYD_CMD_RESULT="telnet 127.0.0.1 79"
+                    [ "$has_expect" -eq 0 ] && warn "Совет: установите 'expect' (opkg install expect) для авто-входа." && pause
+                fi
+                break ;;
             0) return 1 ;;
             *) warn "Неверный выбор" ;;
         esac
