@@ -3,7 +3,7 @@
 # Публикация локальных сервисов через SSH-туннели + nginx на VPS
 # https://github.com/l-ptrol/rProxy
 
-VERSION="2.0.0-Alpha.26"
+VERSION="2.0.0-Alpha.27"
 export PATH="/opt/bin:/opt/sbin:$PATH"
 CONF_DIR="/opt/etc/rproxy"
 CONF_FILE="$CONF_DIR/rproxy.conf"
@@ -242,10 +242,20 @@ gen_htpasswd() {
 get_user_system_hash() {
     local user="$1"
     [ -z "$user" ] && return 1
-    # Пытаемся получить хеш из /etc/shadow (требует root прав)
-    if [ -f "/etc/shadow" ] && [ -r "/etc/shadow" ]; then
-        grep "^${user}:" /etc/shadow | cut -d: -f2 | grep -vE "^(\*|\!)$"
-    fi
+    
+    local files="/etc/shadow /etc/passwd /opt/etc/passwd"
+    for f in $files; do
+        if [ -f "$f" ] && [ -r "$f" ]; then
+            local hash=$(grep "^${user}:" "$f" | head -n 1 | cut -d: -f2)
+            # Хеш обычно начинается с $ (например $1$, $6$, $apr1$)
+            # Игнорируем заглушки типа 'x', '*', '!', '!!'
+            if echo "$hash" | grep -q '^\$'; then
+                echo "$hash"
+                return 0
+            fi
+        fi
+    done
+    return 1
 }
 
 select_auth_interactive() {
