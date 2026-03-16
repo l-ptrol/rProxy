@@ -3,7 +3,7 @@
 # Публикация локальных сервисов через SSH-туннели + nginx на VPS
 # https://github.com/l-ptrol/rProxy
 
-VERSION="2.0.0-Alpha.38"
+VERSION="2.0.0-Alpha.39"
 export PATH="/opt/bin:/opt/sbin:$PATH"
 CONF_DIR="/opt/etc/rproxy"
 CONF_FILE="$CONF_DIR/rproxy.conf"
@@ -290,14 +290,14 @@ _auth_handle() {
         
         # Проверка через expect на порт 79
         if expect -c "set timeout 3; spawn telnet 127.0.0.1 79; expect \"Login:\" { send \"$u\\r\" }; expect { \"Password:\" { send \"$p\\r\"; expect { \">\" { exit 0 }; \"#\" { exit 0 }; default { exit 1 } } }; \"#\" { exit 0 }; \">\" { exit 0 }; timeout { exit 1 } }" >> "$log" 2>&1; then
-            echo "[$(date)] Авторизация: УСПЕХ" >> "$log"
+            echo "[$(date)] Авторизация: УСПЕХ (200 OK)" >> "$log"
             printf "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: 0\r\n\r\n"
         else
-            echo "[$(date)] Авторизация: ОТКАЗ" >> "$log"
+            echo "[$(date)] Авторизация: ОТКАЗ (401 Unauthorized)" >> "$log"
             printf "HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Basic realm=\"Keenetic CLI (Dynamic)\"\r\nConnection: close\r\nContent-Length: 0\r\n\r\n"
         fi
     else
-        echo "[$(date)] Заголовок авторизации не найден" >> "$log"
+        echo "[$(date)] Заголовок авторизации не найден (401 Unauthorized)" >> "$log"
         printf "HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Basic realm=\"Keenetic CLI (Dynamic)\"\r\nConnection: close\r\nContent-Length: 0\r\n\r\n"
     fi
 }
@@ -687,13 +687,13 @@ build_ttyd_command_interactive() {
         
         printf "  Выберите тип терминала:\n"
         printf "  ${BOLD}1)${NC}  Системный вход (login) — Linux Shell\n"
-        printf "  ${BOLD}2)${NC}  Keenetic CLI (Порт 79) — Командная строка ОС\n"
+        printf "  ${BOLD}2)${NC}  Прямая оболочка (sh) — Без пароля\n"
         printf "  ${BOLD}0)${NC}  Отмена\n"
         
         prompt "Ваш выбор: "
         case "$REPLY" in
             1) TTYD_CMD_RESULT="login"; break ;;
-            2) TTYD_CMD_RESULT="telnet 127.0.0.1 79"; break ;;
+            2) TTYD_CMD_RESULT="sh"; break ;;
             0) return 1 ;;
             *) warn "Неверный выбор" ;;
         esac
