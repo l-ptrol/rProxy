@@ -3,7 +3,7 @@
 # Публикация локальных сервисов через SSH-туннели + nginx на VPS
 # https://github.com/l-ptrol/rProxy
 
-VERSION="2.0.0-Alpha.12"
+VERSION="2.0.0-Alpha.13"
 export PATH="/opt/bin:/opt/sbin:$PATH"
 CONF_DIR="/opt/etc/rproxy"
 CONF_FILE="$CONF_DIR/rproxy.conf"
@@ -139,8 +139,14 @@ ensure_local_deps() {
 
     _has_cmd openssl || missing="$missing openssl-util"
     _has_cmd curl    || missing="$missing curl"
-    
-    if [ -n "$missing" ]; then
+    _has_cmd ttyd    || missing="$missing ttyd"
+    _has_cmd pkill   || missing="$missing procps-ng-pkill"
+    _has_cmd fuser   || missing="$missing psmisc"
+
+    # Проверка ss или netstat
+    if ! _has_cmd ss && ! _has_cmd netstat; then
+        missing="$missing ip-full"
+    fi
         warn "Обнаружены недостающие пакеты:$missing"
         msg "Попытка автоматической установки через opkg..."
         
@@ -1332,32 +1338,45 @@ start_ttyd() {
     local cmd="${SVC_TTYD_CMD:-login}"
     local log="/tmp/rproxy_ttyd_${port}.log"
     local pid_file="/opt/var/run/rproxy/ttyd_${port}.pid"
-    local ttyd_bin="/opt/bin/ttyd"
+    
+    # 0️⃣ Динамический поиск бинарника
+    local ttyd_bin=""
+    if command -v ttyd >/dev/null 2>&1; then
+        ttyd_bin=$(command -v ttyd)
+    elif [ -x "/opt/bin/ttyd" ]; then
+        ttyd_bin="/opt/bin/ttyd"
+    else
+        msg "ttyd не найден. Попытка установки..."
+        opkg update >/dev/null 2>&1
+        opkg install ttyd >/dev/null 2>&1
+        ttyd_bin=$(command -v ttyd || echo "/opt/bin/ttyd")
+    fi
+
+    if [ ! -x "$ttyd_bin" ]; then
+        err "Критическая ошибка: бинарник ttyd не найден или не имеет прав на запуск!"
+        return 1
+    fi
 
     msg "Запуск ttyd терминала с Watchdog..."
+    msg "Бинарник: $ttyd_bin"
     msg "Порт: $port"
-    msg "Команда: $cmd"
 
     mkdir -p /opt/var/run/rproxy
 
-    # 1️⃣ Расширенные переменные окружения
+    # 1️⃣ Переменные окружения
     export TERM=xterm-256color
     export HOME=/root
     export USER=root
     export SHELL=/bin/sh
     export PATH="/opt/bin:/opt/sbin:/usr/bin:/bin:$PATH"
-    # Оставляем минимальный LD_LIBRARY_PATH для предотвращения Segfault
     export LD_LIBRARY_PATH="/opt/lib:/opt/usr/lib"
 
-    # 2️⃣ Усиленная очистка
-    if [ -f "$pid_file" ]; then
-        kill "$(cat "$pid_file")" 2>/dev/null
-        rm -f "$pid_file"
-    fi
-
+    # 2️⃣ Очистка
+    [ -f "$pid_file" ] && { kill "$(cat "$pid_file")" 2>/dev/null; rm -f "$pid_file"; }
+    
     for i in 1 2 3; do
         if _is_port_busy "$port"; then
-            msg "Порт $port занят — очистка..."
+            msg "Порт $port занят — освобождение..."
             fuser -k ${port}/tcp >/dev/null 2>&1
             pkill -9 -f "ttyd.*-p $port" >/dev/null 2>&1
             sleep 1
@@ -1366,43 +1385,34 @@ start_ttyd() {
         fi
     done
 
-    # 3️⃣ Watchdog Launcher (фоновый цикл)
+    # 3️⃣ Watchdog Launcher
     (
         while true; do
+            # Внутренняя проверка перед запуском
             if [ -x "$ttyd_bin" ]; then
-                # Запускаем через env -i для максимально чистой среды, если нужно, 
-                # но пока просто прямой вызов с нашими экспортами
-                $ttyd_bin \
-                    -W \
-                    -a \
-                    --max-clients 10 \
-                    -i 0.0.0.0 \
-                    -p "$port" \
-                    $cmd \
-                    >> "$log" 2>&1
+                $ttyd_bin -W -a --max-clients 10 -i 0.0.0.0 -p "$port" $cmd >> "$log" 2>&1
             else
-                echo "$(date) Error: ttyd not found at $ttyd_bin" >> "$log"
+                echo "$(date) Error: ttyd lost during runtime!" >> "$log"
+                exit 1
             fi
-            
-            echo "$(date) ttyd stopped/crashed (exit code $?), restarting in 2s..." >> "$log"
+            echo "$(date) ttyd stopped, restarting in 2s..." >> "$log"
             sleep 2
         done
     ) &
 
-    local pid=$!
-    echo "$pid" > "$pid_file"
+    local watchdog_pid=$!
+    echo "$watchdog_pid" > "$pid_file"
 
-    # 4️⃣ Проверка запуска по порту
-    sleep 2
+    # 4️⃣ Верификация старта
+    sleep 3
     if _is_port_busy "$port"; then
-        msg "ttyd успешно запущен (Watchdog PID $pid)"
+        msg "ttyd успешно запущен (Watchdog PID $watchdog_pid)"
         return 0
     else
-        err "Ошибка запуска ttyd!"
-        if [ -s "$log" ]; then
-            printf "${YELLOW}Последние строки лога:${NC}\n"
-            tail -n 15 "$log"
-        fi
+        err "ttyd не смог открыть порт за 3 секунды. Отмена."
+        kill "$watchdog_pid" 2>/dev/null
+        rm -f "$pid_file"
+        [ -s "$log" ] && tail -n 10 "$log"
         return 1
     fi
 }
