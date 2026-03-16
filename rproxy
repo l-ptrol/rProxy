@@ -3,7 +3,7 @@
 # Публикация локальных сервисов через SSH-туннели + nginx на VPS
 # https://github.com/l-ptrol/rProxy
 
-VERSION="2.0.0-Alpha.32"
+VERSION="2.0.0-Alpha.33"
 export PATH="/opt/bin:/opt/sbin:$PATH"
 CONF_DIR="/opt/etc/rproxy"
 CONF_FILE="$CONF_DIR/rproxy.conf"
@@ -51,6 +51,15 @@ draw_box() {
 
 draw_separator() {
     printf "${DIM}──────────────────────────────────────────────────${NC}\n"
+}
+
+mask_and_escape() {
+    local str="$1"
+    # Визуализируем \r, чтобы он не затирал строку в консоли
+    str=$(echo "$str" | sed 's/\r/\\r/g')
+    # Маскируем пароль в командах expect
+    str=$(echo "$str" | sed -E 's/send "[^"]+(\\r)"/send "****\\1"/g')
+    echo "$str"
 }
 
 prompt() {
@@ -646,8 +655,13 @@ build_ttyd_command_interactive() {
         case "$REPLY" in
             1) 
                 if [ "$has_expect" -eq 1 ] && [ -n "$DEFAULT_AUTH_USER" ] && [ -n "$DEFAULT_AUTH_PASS" ]; then
-                    TTYD_CMD_RESULT="expect -c 'spawn login; expect \"Login:\" { send \"$DEFAULT_AUTH_USER\\r\" }; expect \"Password:\" { send \"$DEFAULT_AUTH_PASS\\r\" }; interact'"
-                    msg "Автоматический вход (expect) включен."
+                    prompt "Включить авто-вход (expect)? (д/н) [д]: "
+                    if [ "${REPLY:-д}" = "д" ]; then
+                        TTYD_CMD_RESULT="expect -c 'spawn login; expect \"Login:\" { send \"$DEFAULT_AUTH_USER\\r\" }; expect \"Password:\" { send \"$DEFAULT_AUTH_PASS\\r\" }; interact'"
+                        msg "Автоматический вход (expect) включен."
+                    else
+                        TTYD_CMD_RESULT="login"
+                    fi
                 else
                     TTYD_CMD_RESULT="login"
                 fi
@@ -655,8 +669,13 @@ build_ttyd_command_interactive() {
             2) TTYD_CMD_RESULT="sh"; break ;;
             3)
                 if [ "$has_expect" -eq 1 ] && [ -n "$DEFAULT_AUTH_USER" ] && [ -n "$DEFAULT_AUTH_PASS" ]; then
-                    TTYD_CMD_RESULT="expect -c 'spawn telnet 127.0.0.1 79; expect \"Login:\" { send \"$DEFAULT_AUTH_USER\\r\" }; expect \"Password:\" { send \"$DEFAULT_AUTH_PASS\\r\" }; interact'"
-                    msg "Автоматический вход в CLI включен."
+                    prompt "Включить авто-вход в CLI? (д/н) [д]: "
+                    if [ "${REPLY:-д}" = "д" ]; then
+                        TTYD_CMD_RESULT="expect -c 'spawn telnet 127.0.0.1 79; expect \"Login:\" { send \"$DEFAULT_AUTH_USER\\r\" }; expect \"Password:\" { send \"$DEFAULT_AUTH_PASS\\r\" }; interact'"
+                        msg "Автоматический вход в CLI включен."
+                    else
+                        TTYD_CMD_RESULT="telnet 127.0.0.1 79"
+                    fi
                 else
                     TTYD_CMD_RESULT="telnet 127.0.0.1 79"
                     [ "$has_expect" -eq 0 ] && warn "Совет: установите 'expect' (opkg install expect) для авто-входа." && pause
@@ -1270,10 +1289,10 @@ do_edit_interactive() {
         printf "\n"
         draw_separator
         printf "  ${DIM}Было:${NC}   %s:%s (внешний: %s) Auth: %s" "$SVC_TARGET_HOST" "$SVC_TARGET_PORT" "$SVC_EXT_PORT" "$SVC_NDM_AUTH"
-        [ "$SVC_TYPE" = "ttyd" ] && printf " [CMD: %s]" "$SVC_TTYD_CMD"
+        [ "$SVC_TYPE" = "ttyd" ] && printf " [CMD: %s]" "$(mask_and_escape "$SVC_TTYD_CMD")"
         printf "\n"
         printf "  ${GREEN}Стало:${NC}  %s:%s (внешний: %s) Auth: %s" "$new_host" "$new_port" "$new_ext_port" "$new_auth_enabled"
-        [ "$SVC_TYPE" = "ttyd" ] && printf " [CMD: %s]" "$new_ttyd_cmd"
+        [ "$SVC_TYPE" = "ttyd" ] && printf " [CMD: %s]" "$(mask_and_escape "$new_ttyd_cmd")"
         printf "\n"
         draw_separator
 
