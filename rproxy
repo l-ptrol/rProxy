@@ -3,7 +3,7 @@
 # Публикация локальных сервисов через SSH-туннели + nginx на VPS
 # https://github.com/l-ptrol/rProxy
 
-VERSION="2.0.0"
+VERSION="2.0.1"
 export PATH="/opt/bin:/opt/sbin:$PATH"
 CONF_DIR="/opt/etc/rproxy"
 CONF_FILE="$CONF_DIR/rproxy.conf"
@@ -2208,9 +2208,31 @@ ensure_local_deps
 
 # Поддержка прямых команд для init-скрипта и автоматизации
 case "${1:-}" in
-    start)      check_conf && do_start_all ;;
-    stop)       check_conf && do_stop_all ;;
-    restart)    check_conf && do_stop_all; sleep 1; do_start_all ;;
+    start)      
+        check_conf || exit 1
+        if [ -n "$2" ]; then do_start_service "$2"; else do_start_all; fi
+        ;;
+    stop)       
+        check_conf || exit 1
+        if [ -n "$2" ]; then do_stop_service "$2"; else do_stop_all; fi
+        ;;
+    restart)    
+        check_conf || exit 1
+        if [ -n "$2" ]; then do_stop_service "$2" && sleep 1 && do_start_service "$2"; else do_stop_all; sleep 1; do_start_all; fi
+        ;;
+    ssl)
+        check_conf || exit 1
+        if [ -n "$2" ]; then
+            if [ "$2" = "all" ]; then
+                for f in "$SERVICES_DIR"/*.conf; do
+                    [ -f "$f" ] || continue
+                    load_service "$(basename "$f" .conf)" && do_ssl_interactive
+                done
+            else
+                load_service "$2" && do_ssl_interactive
+            fi
+        fi
+        ;;
     status)
         check_conf || { err "VPS не настроен"; exit 1; }
         for f in "$SERVICES_DIR"/*.conf; do
