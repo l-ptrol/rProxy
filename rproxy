@@ -3,7 +3,7 @@
 # Публикация локальных сервисов через SSH-туннели + nginx на VPS
 # https://github.com/l-ptrol/rProxy
 
-VERSION="2.0.0-Alpha.44"
+VERSION="2.0.0-Alpha.45"
 export PATH="/opt/bin:/opt/sbin:$PATH"
 CONF_DIR="/opt/etc/rproxy"
 CONF_FILE="$CONF_DIR/rproxy.conf"
@@ -325,6 +325,19 @@ next_free_ext_port() {
         for f in "$SERVICES_DIR"/*.conf; do
             [ -f "$f" ] || continue
             grep -q "SVC_EXT_PORT=\"$port\"" "$f" && used=1 && break
+        done
+        [ "$used" -eq 0 ] && echo "$port" && return
+        port=$((port + 1))
+    done
+}
+
+next_free_ttyd_port() {
+    local port=$BASE_TTYD_PORT
+    while true; do
+        local used=0
+        for f in "$SERVICES_DIR"/*.conf; do
+            [ -f "$f" ] || continue
+            grep -q "SVC_TTYD_PORT=\"$port\"" "$f" && used=1 && break
         done
         [ "$used" -eq 0 ] && echo "$port" && return
         port=$((port + 1))
@@ -656,10 +669,12 @@ do_add_interactive() {
                 printf "  Тип:      ${CYAN}%s${NC}\n\n" "$svc_type"
                 
                 if [ "$svc_type" = "ttyd" ]; then
-                    target="127.0.0.1:7681"
-                    msg "Будет использован встроенный ttyd (порт 7681)"
+                    local ttyd_port=$(next_free_ttyd_port)
+                    target="127.0.0.1:$ttyd_port"
+                    msg "Будет использован встроенный ttyd (порт $ttyd_port)"
                     if build_ttyd_command_interactive; then
                         ttyd_cmd="$TTYD_CMD_RESULT"
+                        SVC_TTYD_PORT="$ttyd_port"
                         step=4
                     else
                         step=2
@@ -898,7 +913,10 @@ EOF
                     printf 'SVC_NDM_AUTH="%s"\n' "$use_ndm_auth"
                     printf "SVC_HTPASSWD='%s'\n" "$htpasswd_line"
                     printf 'SVC_TYPE="%s"\n' "$svc_type"
-                    [ -n "$ttyd_cmd" ] && printf 'SVC_TTYD_CMD="%s"\n' "$ttyd_cmd"
+                    if [ "$svc_type" = "ttyd" ]; then
+                        [ -n "$ttyd_cmd" ] && printf 'SVC_TTYD_CMD="%s"\n' "$ttyd_cmd"
+                        printf 'SVC_TTYD_PORT="%s"\n' "$SVC_TTYD_PORT"
+                    fi
                     printf 'SVC_ENABLED="yes"\n'
                 } > "$SERVICES_DIR/$name.conf"
 
@@ -1391,6 +1409,24 @@ do_stop_interactive() {
     pause
 }
 
+do_start_all() {
+    msg "Запускаю все настроенные сервисы..."
+    for f in "$SERVICES_DIR"/*.conf; do
+        [ -f "$f" ] || continue
+        local s_name=$(basename "$f" .conf)
+        do_start_service "$s_name"
+    done
+}
+
+do_stop_all() {
+    msg "Останавливаю все настроенные сервисы..."
+    for f in "$SERVICES_DIR"/*.conf; do
+        [ -f "$f" ] || continue
+        local s_name=$(basename "$f" .conf)
+        do_stop_service "$s_name"
+    done
+}
+
 do_restart_interactive() {
     clear_screen
     draw_box "Перезапустить туннель"
@@ -1567,9 +1603,9 @@ do_start_service() {
 
     # Динамический порт для ttyd
     if [ "$SVC_TYPE" = "ttyd" ]; then
-        if start_ttyd; then
-            # По умолчанию пользователь использует 7681
-            SVC_TARGET_PORT=7681
+        local t_port="${SVC_TTYD_PORT:-7681}"
+        if start_ttyd "$t_port"; then
+            SVC_TARGET_PORT="$t_port"
             SVC_TARGET_HOST="127.0.0.1"
         else
             rm -f "$lock_file"
@@ -1686,7 +1722,7 @@ do_stop_service() {
 
     # Теперь ttyd если был
     if [ "$SVC_TYPE" = "ttyd" ]; then
-        stop_ttyd
+        stop_ttyd "${SVC_TTYD_PORT:-7681}"
     fi
 
     msg "Сервис '$name' остановлен"
