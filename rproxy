@@ -3,7 +3,7 @@
 # Публикация локальных сервисов через SSH-туннели + nginx на VPS
 # https://github.com/l-ptrol/rProxy
 
-VERSION="2.0.0-Alpha.25"
+VERSION="2.0.0-Alpha.26"
 export PATH="/opt/bin:/opt/sbin:$PATH"
 CONF_DIR="/opt/etc/rproxy"
 CONF_FILE="$CONF_DIR/rproxy.conf"
@@ -239,10 +239,12 @@ gen_htpasswd() {
     fi
 }
 
-get_system_root_hash() {
+get_user_system_hash() {
+    local user="$1"
+    [ -z "$user" ] && return 1
     # Пытаемся получить хеш из /etc/shadow (требует root прав)
     if [ -f "/etc/shadow" ] && [ -r "/etc/shadow" ]; then
-        grep "^root:" /etc/shadow | cut -d: -f2
+        grep "^${user}:" /etc/shadow | cut -d: -f2 | grep -vE "^(\*|\!)$"
     fi
 }
 
@@ -250,9 +252,13 @@ select_auth_interactive() {
     local default_user="${DEFAULT_AUTH_USER:-admin}"
     local default_pass="${DEFAULT_AUTH_PASS}"
     
-    # Пытаемся найти системных админов через ndmq
-    local system_admins=$(ndmq -p "show admins" 2>/dev/null | grep -E "admin:" | awk '{print $1}' | sed 's/://' | tr '\n' ' ')
-    [ -z "$system_admins" ] && system_admins="admin"
+    # Собираем список кандидатов (root + результат ndmq)
+    local raw_admins="root $(ndmq -p "show admins" 2>/dev/null | grep -E "admin:" | awk '{print $1}' | sed 's/://')"
+    local system_admins=""
+    for adm in $raw_admins; do
+        # Убираем дубликаты
+        echo "$system_admins" | grep -q "\<$adm\>" || system_admins="$system_admins $adm"
+    done
 
     while true; do
         clear_screen
@@ -260,30 +266,33 @@ select_auth_interactive() {
         printf "  Выберите данные для защиты сервиса:\n\n"
         
         local idx=1
-        local item_1="" item_2="" item_3="" item_4="" item_5=""
+        # Очищаем переменные
+        for i in 1 2 3 4 5 6 7 8 9; do
+            eval "item_$i=\"\""
+            eval "item_hash_$i=\"\""
+        done
         
         for adm in $system_admins; do
-            [ "$idx" -gt 5 ] && break
-            printf "  ${BOLD}%d)${NC}  Системный вход (Keenetic): ${CYAN}%s${NC}\n" "$idx" "$adm"
+            [ "$idx" -gt 7 ] && break
+            local hash=$(get_user_system_hash "$adm")
+            if [ -n "$hash" ]; then
+                printf "  ${BOLD}%d)${NC}  Системный вход: ${CYAN}%s${NC} ${GREEN}(автоматически)${NC}\n" "$idx" "$adm"
+                eval "item_hash_$idx=\"$hash\""
+            else
+                printf "  ${BOLD}%d)${NC}  Системный вход: ${CYAN}%s${NC}\n" "$idx" "$adm"
+            fi
             eval "item_$idx=\"$adm\""
             idx=$((idx + 1))
         done
         
         if [ -n "$DEFAULT_AUTH_USER" ]; then
-            printf "  ${BOLD}%d)${NC}  Стандартные данные rproxy: ${CYAN}%s${NC}\n" "$idx" "$DEFAULT_AUTH_USER"
+            printf "  ${BOLD}%d)${NC}  Стандартные данные rproxy: ${CYAN}%s${NC} ${GREEN}(из конфига)${NC}\n" "$idx" "$DEFAULT_AUTH_USER"
             eval "item_$idx=\"DEFAULT_AUTH\""
             idx=$((idx + 1))
         fi
         
         printf "  ${BOLD}%d)${NC}  Ввести логин и пароль вручную\n" "$idx"
         eval "item_$idx=\"CUSTOM\""
-        idx=$((idx + 1))
-
-        local root_hash=$(get_system_root_hash)
-        if [ -n "$root_hash" ] && [ "$root_hash" != "*" ] && [ "$root_hash" != "!" ]; then
-             printf "  ${BOLD}%d)${NC}  Системный пароль root (автоматически)\n" "$idx"
-             eval "item_$idx=\"SYSTEM_ROOT\""
-        fi
         
         printf "  ${BOLD}0)${NC}  Без защиты (отключить)\n"
         
@@ -292,8 +301,11 @@ select_auth_interactive() {
         
         local choice="$REPLY"
         local type=$(eval echo \$item_$choice)
+        local pre_hash=$(eval echo \$item_hash_$choice)
         
-        local user="" pass=""
+        if [ -z "$type" ]; then warn "Неверный выбор"; pause; continue; fi
+        
+        local user="" pass="" pass_hash=""
         
         case "$type" in
             CUSTOM)
@@ -308,24 +320,21 @@ select_auth_interactive() {
                 user="$DEFAULT_AUTH_USER"
                 pass="$DEFAULT_AUTH_PASS"
                 ;;
-            SYSTEM_ROOT)
-                user="root"
-                pass_hash="$root_hash"
-                ;;
-            "")
-                warn "Неверный выбор"; pause; continue
-                ;;
             *)
                 user="$type"
-                prompt "Введите пароль для системного пользователя '$user': "
-                pass="$REPLY"
-                [ -z "$pass" ] && { warn "Пароль не может быть пустым"; pause; continue; }
+                if [ -n "$pre_hash" ]; then
+                    pass_hash="$pre_hash"
+                else
+                    prompt "Введите пароль для системного пользователя '$user': "
+                    pass="$REPLY"
+                    [ -z "$pass" ] && { warn "Пароль не может быть пустым"; pause; continue; }
+                fi
                 ;;
         esac
         
         AUTH_RESULT_ENABLED="yes"
-        if [ "$type" = "SYSTEM_ROOT" ]; then
-            AUTH_RESULT_HTPASSWD="root:$pass_hash"
+        if [ -n "$pass_hash" ]; then
+            AUTH_RESULT_HTPASSWD="$user:$pass_hash"
         else
             AUTH_RESULT_HTPASSWD=$(gen_htpasswd "$user" "$pass")
         fi
