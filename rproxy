@@ -3,7 +3,7 @@
 # Публикация локальных сервисов через SSH-туннели + nginx на VPS
 # https://github.com/l-ptrol/rProxy
 
-VERSION="2.0.0-Alpha.22"
+VERSION="2.0.0-Alpha.23"
 export PATH="/opt/bin:/opt/sbin:$PATH"
 CONF_DIR="/opt/etc/rproxy"
 CONF_FILE="$CONF_DIR/rproxy.conf"
@@ -278,6 +278,31 @@ count_services() {
     echo $count
 }
 
+do_hard_cleanup() {
+    draw_box "Глубокая очистка (Hard Reset)"
+    warn "Это действие ПРИНУДИТЕЛЬНО остановит все процессы ttyd и rproxy."
+    warn "Используйте это, если терминал не принимает ввод или завис."
+    prompt "Продолжить? (y/n): "
+    [ "$REPLY" != "y" ] && { msg "Отменено"; return; }
+
+    msg "Останавливаю все настроенные сервисы..."
+    do_stop_all 2>/dev/null
+
+    msg "Принудительное уничтожение процессов ttyd..."
+    killall ttyd 2>/dev/null
+    pkill -9 -f ttyd 2>/dev/null
+
+    msg "Принудительное уничтожение фоновых процессов rproxy (Watchdog)..."
+    pkill -9 -f "rproxy.*ttyd" 2>/dev/null
+
+    msg "Очистка временных файлов и логов..."
+    rm -f /tmp/rproxy_ttyd_*.log
+    rm -rf /opt/var/run/rproxy/*
+    
+    msg "Глубокая очистка завершена!"
+    pause
+}
+
 # ══════════════════════════════════════════════════════════════════════
 # ГЛАВНОЕ МЕНЮ
 # ══════════════════════════════════════════════════════════════════════
@@ -332,6 +357,7 @@ main_menu() {
         printf "  ${BOLD}9)${NC}  ⚙️   Настройки VPS\n"
         printf "  ${BOLD}10)${NC} 🚀  Обновить rProxy\n"
         printf "  ${BOLD}11)${NC} 🏥  Проверка VPS (Health)\n"
+        printf "  ${BOLD}99)${NC} ☢️   Глубокая очистка (Hard Reset)\n"
         printf "  ${BOLD}0)${NC}  🚪  Выход\n"
 
         prompt "Выберите действие: "
@@ -348,6 +374,7 @@ main_menu() {
             9) do_setup ;;
             10) do_self_update ;;
             11) do_health_check ;;
+            99) do_hard_cleanup ;;
             0|q) clear_screen; exit 0 ;;
             *) ;;
         esac
@@ -482,24 +509,12 @@ build_ttyd_command_interactive() {
         printf "  Выберите тип подключения:\n"
         printf "  ${BOLD}1)${NC}  Системный вход (login) — стандарт роутера\n"
         printf "  ${BOLD}2)${NC}  Оболочка (sh) — прямой вход без пароля\n"
-        printf "  ${BOLD}3)${NC}  SSH — подключение к себе на роутер (выбор порта)\n"
         printf "  ${BOLD}0)${NC}  Отмена\n"
         
         prompt "Ваш выбор: "
         case "$REPLY" in
             1) TTYD_CMD_RESULT="login"; break ;;
             2) TTYD_CMD_RESULT="sh"; break ;;
-            3)
-                local ssh_bin="/opt/bin/ssh"
-                [ ! -f "$ssh_bin" ] && ssh_bin="ssh"
-                prompt "Порт SSH [222 - Entware, 22 - Keenetic]: "
-                local port="${REPLY:-222}"
-                prompt "Пользователь [root]: "
-                local user="${REPLY:-root}"
-                # Максимально простая и надежная команда
-                TTYD_CMD_RESULT="$ssh_bin -tt -o StrictHostKeyChecking=no -p $port $user@127.0.0.1"
-                break
-                ;;
             0) return 1 ;;
             *) warn "Неверный выбор" ;;
         esac
