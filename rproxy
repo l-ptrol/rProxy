@@ -3,7 +3,7 @@
 # Публикация локальных сервисов через SSH-туннели + nginx на VPS
 # https://github.com/l-ptrol/rProxy
 
-VERSION="2.0.0-Alpha.33"
+VERSION="2.0.0-Alpha.34"
 export PATH="/opt/bin:/opt/sbin:$PATH"
 CONF_DIR="/opt/etc/rproxy"
 CONF_FILE="$CONF_DIR/rproxy.conf"
@@ -251,13 +251,16 @@ gen_htpasswd() {
 
 _auth_handle() {
     local auth_header=""
+    local log="/tmp/rproxy_auth.log"
+    
     # Читаем HTTP заголовок
     while read -r line; do
         line=$(echo "$line" | tr -d '\r')
         [ -z "$line" ] && break
-        case "$line" in
-            Authorization:*) auth_header=$(echo "$line" | cut -d' ' -f2) ;;
-            authorization:*) auth_header=$(echo "$line" | cut -d' ' -f2) ;;
+        case "$(echo "$line" | tr '[:upper:]' '[:lower:]')" in
+            authorization:*) 
+                auth_header=$(echo "$line" | awk '{print $NF}')
+                ;;
         esac
     done
 
@@ -279,15 +282,19 @@ _auth_handle() {
 
 start_auth_provider() {
     local port=7979
-    if netstat -tln | grep -q ":$port "; then
+    local fifo="/tmp/rproxy_auth.fifo"
+    if netstat -tln 2>/dev/null | grep -q ":$port "; then
         return 0
     fi
     [ ! -x "/opt/bin/expect" ] && { err "Пакет 'expect' не найден! Динамическая авторизация невозможна."; return 1; }
     
     msg "Запуск Auth Provider на порту $port..."
+    rm -f "$fifo"
+    mkfifo "$fifo"
     (
         while true; do
-            nc -l -p $port -e "$0" _auth_handle 2>/dev/null || sleep 1
+            # Универсальная схема через FIFO (работает с любым nc)
+            cat "$fifo" | "$0" _auth_handle | nc -l -p $port > "$fifo" 2>/dev/null || sleep 1
         done
     ) &
     echo $! > "$PID_DIR/auth_provider.pid"
@@ -1666,7 +1673,8 @@ do_start_service() {
     export AUTOSSH_PATH="$ssh_exec"
 
     msg "Проверка порта $SVC_TUNNEL_PORT на VPS..."
-    local check_cmd='(command -v ss >/dev/null 2>&1 && ss -tln || command -v netstat >/dev/null 2>&1 && netstat -tnl || [ -f /proc/net/tcp ] && cat /proc/net/tcp) | grep -i ":$(printf "%04X" $SVC_TUNNEL_PORT)\|:$SVC_TUNNEL_PORT " >/dev/null 2>&1'
+    local hex_port=$(printf "%04X" $SVC_TUNNEL_PORT)
+    local check_cmd="grep -q \" :$hex_port \" /proc/net/tcp 2>/dev/null || (command -v ss >/dev/null 2>&1 && ss -tln | grep -q \":$SVC_TUNNEL_PORT \") || (command -v netstat >/dev/null 2>&1 && netstat -tnl 2>/dev/null | grep -q \":$SVC_TUNNEL_PORT \")"
     if ssh_cmd "$check_cmd"; then
         warn "Порт $SVC_TUNNEL_PORT на VPS уже занят. Пытаюсь освободить..."
         ssh_cmd "fuser -k $SVC_TUNNEL_PORT/tcp >/dev/null 2>&1 || true"
