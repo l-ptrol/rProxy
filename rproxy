@@ -3,7 +3,7 @@
 # Публикация локальных сервисов через SSH-туннели + nginx на VPS
 # https://github.com/l-ptrol/rProxy
 
-VERSION="2.0.0-Alpha.43"
+VERSION="2.0.0-Alpha.44"
 export PATH="/opt/bin:/opt/sbin:$PATH"
 CONF_DIR="/opt/etc/rproxy"
 CONF_FILE="$CONF_DIR/rproxy.conf"
@@ -261,126 +261,19 @@ gen_htpasswd() {
     fi
 }
 
-_auth_handle() {
-    local auth_token=""
-    local log="/tmp/rproxy_auth.log"
-    
-    # Читаем первую строку (Request Line)
-    if ! read -r request_line; then
-        return
-    fi
-    request_line=$(echo "$request_line" | tr -d '\r\n')
-    [ -z "$request_line" ] && return
-    
-    # Валидация метода (ЗАЩИТА ОТ РЕКУРСИИ/ЭХА)
-    # Строгая проверка: Метод + Пробел + Путь (GET /...)
-    case "$request_line" in
-        GET\ /*|POST\ /*|PUT\ /*|DELETE\ /*|HEAD\ /*|OPTIONS\ /*) ;;
-        *) 
-            echo "[$(date)] Игнорирую не-HTTP запрос (эхо): $request_line" >> "$log"
-            return 
-            ;;
-    esac
-
-    echo "[$(date)] --- Новое соединение ---" >> "$log"
-    echo "[$(date)] Request: $request_line" >> "$log"
-    
-    # Читаем HTTP заголовки
-    while read -t 1 line; do
-        line=$(echo "$line" | tr -d '\r\n')
-        [ -z "$line" ] && break
-        
-        echo "[$(date)] Header: $line" >> "$log"
-        
-        # Поиск Authorization (регистронезависимо)
-        case "$(echo "$line" | tr '[:upper:]' '[:lower:]')" in
-            authorization:*) 
-                # Извлекаем токен, отрезаем "Basic " (любого регистра)
-                auth_token=$(echo "$line" | cut -d' ' -f2-)
-                auth_token=${auth_token#Basic }
-                auth_token=${auth_token#basic }
-                echo "[$(date)] Найден заголовок Authorization" >> "$log"
-                ;;
-        esac
-    done
-
-    if [ -n "$auth_token" ]; then
-        # Декодируем учетные данные для curl
-        local decoded=""
-        decoded=$(echo "$auth_token" | openssl base64 -d 2>/dev/null)
-        
-        if [ -n "$decoded" ]; then
-            # СВЕРХБЫСТРАЯ ПРОВЕРКА через RCI (порт 79)
-            # Это нативно, безопасно (без инъекций в expect) и очень быстро
-            if [ "$(curl -s -o /dev/null -w "%{http_code}" -u "$decoded" http://127.0.0.1:79/rci/show/system)" = "200" ]; then
-                echo "[$(date)] Авторизация: УСПЕХ (200 OK)" >> "$log"
-                printf "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: 0\r\n\r\n"
-                return
-            fi
-        fi
-    fi
-
-    # Если не авторизован - отправляем 401. 
-    # Nginx на VPS перехватит 401 и покажет окно входа через @auth
-    echo "[$(date)] Авторизация: ОТКАЗ (401 Unauthorized)" >> "$log"
-    printf "HTTP/1.1 401 Unauthorized\r\nConnection: close\r\nContent-Length: 0\r\n\r\n"
-}
-
-start_auth_provider() {
-    local port=7979
-    local fifo="/tmp/rproxy_auth.fifo"
-    if netstat -tln 2>/dev/null | grep -q ":$port "; then
-        return 0
-    fi
-    [ ! -x "/opt/bin/expect" ] && { err "Пакет 'expect' не найден! Динамическая авторизация невозможна."; return 1; }
-    
-    # Проверка nc на поддержку режима прослушивания (-l)
-    if ! nc -h 2>&1 | grep -q " -l "; then
-        err "Встроенный 'nc' не поддерживает прослушивание. Установите 'netcat': opkg install netcat"
-        return 1
-    fi
-
-    msg "Запуск Auth Provider на порту $port..."
-    (
-        while true; do
-            # Используем режим -e (execute) для прямой связи с обработчиком.
-            # Это исключает рекурсию (чтение собственного вывода через FIFO).
-            # Пакет 'netcat' в Entware поддерживает этот режим.
-            if ! nc -l -p $port -e "$0" _auth_handle 2>/dev/null; then
-                sleep 5
-            else
-                sleep 1
-            fi
-        done
-    ) &
-    echo $! > "$PID_DIR/auth_provider.pid"
-}
+# Динамическая авторизация удалена в v2.0.0-Alpha.44 для упрощения.
 
 select_auth_interactive() {
     local default_user="${DEFAULT_AUTH_USER:-admin}"
     local default_pass="${DEFAULT_AUTH_PASS}"
     
-    # Пытаемся найти системных админов через ndmq
-    local system_admins=$(ndmq -p "show admins" 2>/dev/null | grep -E "admin:" | awk '{print $1}' | sed 's/://' | tr '\n' ' ')
-    [ -z "$system_admins" ] && system_admins="admin"
-
     while true; do
         clear_screen
-        draw_box "Менеджер учетных данных (Basic Auth)"
-        printf "  Выберите данные для защиты сервиса:\n\n"
+        draw_box "Защита доступа (Basic Auth)"
+        printf "  Выберите метод защиты для сервиса:\n\n"
         
         local idx=1
-        for adm in $system_admins; do
-            [ "$idx" -gt 5 ] && break
-            printf "  ${BOLD}%d)${NC}  Системный администратор: ${CYAN}%s${NC}\n" "$idx" "$adm"
-            eval "item_$idx=\"$adm\""
-            idx=$((idx + 1))
-        done
         
-        printf "  ${BOLD}%d)${NC}  ${GREEN}Keenetic CLI (Динамическая проверка)${NC}\n" "$idx"
-        eval "item_$idx=\"DYNAMIC\""
-        idx=$((idx + 1))
-
         if [ -n "$DEFAULT_AUTH_USER" ]; then
             printf "  ${BOLD}%d)${NC}  Стандартные данные rproxy: ${CYAN}%s${NC}\n" "$idx" "$DEFAULT_AUTH_USER"
             eval "item_$idx=\"DEFAULT_AUTH\""
@@ -404,13 +297,6 @@ select_auth_interactive() {
         local user="" pass=""
         
         case "$type" in
-            DYNAMIC)
-                AUTH_RESULT_ENABLED="dynamic"
-                AUTH_RESULT_HTPASSWD=""
-                AUTH_RESULT_USER="admin"  # Заглушка
-                [ ! -x "/opt/bin/expect" ] && warn "Внимание: 'expect' не установлен. Установите командой: opkg install expect"
-                return 0
-                ;;
             CUSTOM)
                 prompt "Имя пользователя: "
                 user="$REPLY"
@@ -422,12 +308,6 @@ select_auth_interactive() {
             DEFAULT_AUTH)
                 user="$DEFAULT_AUTH_USER"
                 pass="$DEFAULT_AUTH_PASS"
-                ;;
-            *)
-                user="$type"
-                prompt "Введите пароль для пользователя '$user': "
-                pass="$REPLY"
-                [ -z "$pass" ] && { warn "Пароль не может быть пустым"; pause; continue; }
                 ;;
         esac
         
@@ -701,7 +581,7 @@ build_ttyd_command_interactive() {
     TTYD_CMD_RESULT=""
     
     local has_expect=0
-    [ -x "/opt/bin/expect" ] && has_expect=1
+    [ -x "/opt/bin/expect" ] && has_expect=0 # Removed for simplification
 
     while true; do
         clear_screen
@@ -1193,7 +1073,7 @@ do_health_check() {
     printf "\n"
     msg "Утилиты на роутере:"
     [ -x "/opt/bin/ssh" ] && printf "  SSH:          ${GREEN}Entware OK${NC}\n" || printf "  SSH:          ${RED}Missing${NC}\n"
-    [ -x "/opt/bin/autossh" ] && printf "  AutoSSH:      ${GREEN}OK${NC}\n" || printf "  AutoSSH:      ${RED}Missing${NC}\n"
+    [ -x "/opt/bin/autossh" ] && printf "  AutoSSH:      ${GREEN}OK${NC}\n" || printf "  SSH:          ${RED}Missing${NC}\n"
     
     pause
 }
@@ -1713,11 +1593,7 @@ do_start_service() {
     local ssh_opts="-o StrictHostKeyChecking=no -o ServerAliveInterval=10 -o ServerAliveCountMax=3 -o ConnectTimeout=10 -o ExitOnForwardFailure=yes"
     local tunnel_args="-R 0.0.0.0:$SVC_TUNNEL_PORT:$SVC_TARGET_HOST:$SVC_TARGET_PORT"
     
-    # Обратный туннель для динамической авторизации
-    if [ "$SVC_NDM_AUTH" = "dynamic" ]; then
-        start_auth_provider
-        tunnel_args="$tunnel_args -R 7979:localhost:7979"
-    fi
+    # Режим динамической авторизации удален для упрощения.
     
     # Мониторинг порт для autossh (20000 + случайное число)
     local mon_port=$((20000 + RANDOM % 1000))
@@ -1890,25 +1766,6 @@ generate_nginx_conf() {
         auth_config="
     auth_basic \"Restricted Access\";
     auth_basic_user_file /etc/nginx/rproxy_$name.htpasswd;
-    "
-    elif [ "$use_ndm_auth" = "dynamic" ]; then
-        auth_config="
-    auth_request /auth-check;
-    error_page 401 = @auth;
-    
-    location @auth {
-        add_header WWW-Authenticate 'Basic realm=\"Keenetic CLI (Dynamic)\"' always;
-        return 401;
-    }
-    
-    location = /auth-check {
-        internal;
-        proxy_pass http://127.0.0.1:7979;
-        proxy_pass_request_body off;
-        proxy_set_header Content-Length \"\";
-        proxy_set_header X-Original-URI \$request_uri;
-        proxy_set_header Authorization \$http_authorization;
-    }
     "
     fi
 
@@ -2337,7 +2194,7 @@ case "${1:-}" in
         done
         ;;
     _auth_handle)
-        _auth_handle
+        # Удалено для упрощения
         ;;
     init-script)
         cat <<EOF > /opt/etc/init.d/S99rproxy
