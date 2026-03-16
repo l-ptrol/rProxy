@@ -3,7 +3,7 @@
 # Публикация локальных сервисов через SSH-туннели + nginx на VPS
 # https://github.com/l-ptrol/rProxy
 
-VERSION="2.0.0-Alpha.42"
+VERSION="2.0.0-Alpha.43"
 export PATH="/opt/bin:/opt/sbin:$PATH"
 CONF_DIR="/opt/etc/rproxy"
 CONF_FILE="$CONF_DIR/rproxy.conf"
@@ -262,10 +262,10 @@ gen_htpasswd() {
 }
 
 _auth_handle() {
-    local auth_header=""
+    local auth_token=""
     local log="/tmp/rproxy_auth.log"
     
-    # Читаем первую строку (Request Line) - без таймаута, ждем подключения
+    # Читаем первую строку (Request Line)
     if ! read -r request_line; then
         return
     fi
@@ -273,11 +273,11 @@ _auth_handle() {
     [ -z "$request_line" ] && return
     
     # Валидация метода (ЗАЩИТА ОТ РЕКУРСИИ/ЭХА)
-    # Если строка не начинается с HTTP метода - игнорируем без ответа
+    # Строгая проверка: Метод + Пробел + Путь (GET /...)
     case "$request_line" in
-        GET*|POST*|PUT*|DELETE*|HEAD*|OPTIONS*) ;;
+        GET\ /*|POST\ /*|PUT\ /*|DELETE\ /*|HEAD\ /*|OPTIONS\ /*) ;;
         *) 
-            echo "[$(date)] Игнорирую не-HTTP запрос (эхо): $request_line" >> "/tmp/rproxy_auth.log"
+            echo "[$(date)] Игнорирую не-HTTP запрос (эхо): $request_line" >> "$log"
             return 
             ;;
     esac
@@ -285,40 +285,45 @@ _auth_handle() {
     echo "[$(date)] --- Новое соединение ---" >> "$log"
     echo "[$(date)] Request: $request_line" >> "$log"
     
-    # Читаем HTTP заголовки с таймаутом для остальной части пакета
+    # Читаем HTTP заголовки
     while read -t 1 line; do
         line=$(echo "$line" | tr -d '\r\n')
         [ -z "$line" ] && break
         
         echo "[$(date)] Header: $line" >> "$log"
         
+        # Поиск Authorization (регистронезависимо)
         case "$(echo "$line" | tr '[:upper:]' '[:lower:]')" in
             authorization:*) 
-                auth_header=$(echo "$line" | awk '{print $NF}')
+                # Извлекаем токен, отрезаем "Basic " (любого регистра)
+                auth_token=$(echo "$line" | cut -d' ' -f2-)
+                auth_token=${auth_token#Basic }
+                auth_token=${auth_token#basic }
                 echo "[$(date)] Найден заголовок Authorization" >> "$log"
                 ;;
         esac
     done
 
-    if [ -n "$auth_header" ]; then
-        local decoded=$(echo "$auth_header" | openssl base64 -d 2>/dev/null)
-        local u=$(echo "$decoded" | cut -d: -f1)
-        local p=$(echo "$decoded" | cut -d: -f2-)
+    if [ -n "$auth_token" ]; then
+        # Декодируем учетные данные для curl
+        local decoded=""
+        decoded=$(echo "$auth_token" | openssl base64 -d 2>/dev/null)
         
-        echo "[$(date)] Проверка пользователя: $u" >> "$log"
-        
-        # Проверка через expect на порт 79
-        if expect -c "set timeout 3; spawn telnet 127.0.0.1 79; expect \"Login:\" { send \"$u\\r\" }; expect { \"Password:\" { send \"$p\\r\"; expect { \">\" { exit 0 }; \"#\" { exit 0 }; default { exit 1 } } }; \"#\" { exit 0 }; \">\" { exit 0 }; timeout { exit 1 } }" >> "$log" 2>&1; then
-            echo "[$(date)] Авторизация: УСПЕХ (200 OK)" >> "$log"
-            printf "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: 0\r\n\r\n"
-        else
-            echo "[$(date)] Авторизация: ОТКАЗ (401 Unauthorized)" >> "$log"
-            printf "HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Basic realm=\"Keenetic CLI (Dynamic)\"\r\nConnection: close\r\nContent-Length: 0\r\n\r\n"
+        if [ -n "$decoded" ]; then
+            # СВЕРХБЫСТРАЯ ПРОВЕРКА через RCI (порт 79)
+            # Это нативно, безопасно (без инъекций в expect) и очень быстро
+            if [ "$(curl -s -o /dev/null -w "%{http_code}" -u "$decoded" http://127.0.0.1:79/rci/show/system)" = "200" ]; then
+                echo "[$(date)] Авторизация: УСПЕХ (200 OK)" >> "$log"
+                printf "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: 0\r\n\r\n"
+                return
+            fi
         fi
-    else
-        echo "[$(date)] Заголовок авторизации не найден (401 Unauthorized)" >> "$log"
-        printf "HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Basic realm=\"Keenetic CLI (Dynamic)\"\r\nConnection: close\r\nContent-Length: 0\r\n\r\n"
     fi
+
+    # Если не авторизован - отправляем 401. 
+    # Nginx на VPS перехватит 401 и покажет окно входа через @auth
+    echo "[$(date)] Авторизация: ОТКАЗ (401 Unauthorized)" >> "$log"
+    printf "HTTP/1.1 401 Unauthorized\r\nConnection: close\r\nContent-Length: 0\r\n\r\n"
 }
 
 start_auth_provider() {
@@ -1889,8 +1894,12 @@ generate_nginx_conf() {
     elif [ "$use_ndm_auth" = "dynamic" ]; then
         auth_config="
     auth_request /auth-check;
-    auth_request_set \$auth_header \$upstream_http_www_authenticate;
-    add_header WWW-Authenticate \$auth_header always;
+    error_page 401 = @auth;
+    
+    location @auth {
+        add_header WWW-Authenticate 'Basic realm=\"Keenetic CLI (Dynamic)\"' always;
+        return 401;
+    }
     
     location = /auth-check {
         internal;
