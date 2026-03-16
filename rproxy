@@ -3,7 +3,7 @@
 # Публикация локальных сервисов через SSH-туннели + nginx на VPS
 # https://github.com/l-ptrol/rProxy
 
-VERSION="2.0.0-Alpha.41"
+VERSION="2.0.0-Alpha.42"
 export PATH="/opt/bin:/opt/sbin:$PATH"
 CONF_DIR="/opt/etc/rproxy"
 CONF_FILE="$CONF_DIR/rproxy.conf"
@@ -153,6 +153,12 @@ ensure_local_deps() {
     _has_cmd stty    || missing="$missing coreutils-stty"
     _has_cmd pkill   || missing="$missing procps-ng-pkill"
     _has_cmd fuser   || missing="$missing psmisc"
+    
+    # Фикс пути для stty (необходим для expect на Keenetic)
+    if [ -x "/opt/bin/stty" ] && [ ! -L "/bin/stty" ] && [ ! -f "/bin/stty" ]; then
+        msg "Настройка симлинка для stty..."
+        ln -s /opt/bin/stty /bin/stty 2>/dev/null || true
+    fi
 
     # Проверка полноценного nc (не BusyBox)
     if ! nc -h 2>&1 | grep -q " -l "; then
@@ -266,6 +272,16 @@ _auth_handle() {
     request_line=$(echo "$request_line" | tr -d '\r\n')
     [ -z "$request_line" ] && return
     
+    # Валидация метода (ЗАЩИТА ОТ РЕКУРСИИ/ЭХА)
+    # Если строка не начинается с HTTP метода - игнорируем без ответа
+    case "$request_line" in
+        GET*|POST*|PUT*|DELETE*|HEAD*|OPTIONS*) ;;
+        *) 
+            echo "[$(date)] Игнорирую не-HTTP запрос (эхо): $request_line" >> "/tmp/rproxy_auth.log"
+            return 
+            ;;
+    esac
+
     echo "[$(date)] --- Новое соединение ---" >> "$log"
     echo "[$(date)] Request: $request_line" >> "$log"
     
@@ -328,7 +344,7 @@ start_auth_provider() {
             if ! nc -l -p $port -e "$0" _auth_handle 2>/dev/null; then
                 sleep 5
             else
-                sleep 0.5
+                sleep 1
             fi
         done
     ) &
