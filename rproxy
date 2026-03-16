@@ -3,7 +3,7 @@
 # Публикация локальных сервисов через SSH-туннели + nginx на VPS
 # https://github.com/l-ptrol/rProxy
 
-VERSION="2.0.0-Alpha.29"
+VERSION="2.0.0-Alpha.30"
 export PATH="/opt/bin:/opt/sbin:$PATH"
 CONF_DIR="/opt/etc/rproxy"
 CONF_FILE="$CONF_DIR/rproxy.conf"
@@ -239,6 +239,50 @@ gen_htpasswd() {
     fi
 }
 
+_auth_handle() {
+    local auth_header=""
+    # Читаем HTTP заголовок
+    while read -r line; do
+        line=$(echo "$line" | tr -d '\r')
+        [ -z "$line" ] && break
+        case "$line" in
+            Authorization:*) auth_header=$(echo "$line" | cut -d' ' -f2) ;;
+            authorization:*) auth_header=$(echo "$line" | cut -d' ' -f2) ;;
+        esac
+    done
+
+    if [ -n "$auth_header" ]; then
+        local decoded=$(echo "$auth_header" | openssl base64 -d 2>/dev/null)
+        local u=$(echo "$decoded" | cut -d: -f1)
+        local p=$(echo "$decoded" | cut -d: -f2-)
+        
+        # Проверка через expect на порт 79
+        if expect -c "set timeout 5; spawn telnet 127.0.0.1 79; expect \"Login:\" { send \"$u\\r\" }; expect { \"Password:\" { send \"$p\\r\"; expect { \">\" { exit 0 }; default { exit 1 } } }; \"#\" { exit 0 }; \">\" { exit 0 }; timeout { exit 1 } }" >/dev/null 2>&1; then
+            printf "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: 0\r\n\r\n"
+        else
+            printf "HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Basic realm=\"Keenetic CLI (Dynamic)\"\r\nConnection: close\r\nContent-Length: 0\r\n\r\n"
+        fi
+    else
+        printf "HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Basic realm=\"Keenetic CLI (Dynamic)\"\r\nConnection: close\r\nContent-Length: 0\r\n\r\n"
+    fi
+}
+
+start_auth_provider() {
+    local port=7979
+    if netstat -tln | grep -q ":$port "; then
+        return 0
+    fi
+    [ ! -x "/opt/bin/expect" ] && { err "Пакет 'expect' не найден! Динамическая авторизация невозможна."; return 1; }
+    
+    msg "Запуск Auth Provider на порту $port..."
+    (
+        while true; do
+            nc -l -p $port -e "$0" _auth_handle 2>/dev/null || sleep 1
+        done
+    ) &
+    echo $! > "$PID_DIR/auth_provider.pid"
+}
+
 select_auth_interactive() {
     local default_user="${DEFAULT_AUTH_USER:-admin}"
     local default_pass="${DEFAULT_AUTH_PASS}"
@@ -260,6 +304,10 @@ select_auth_interactive() {
             idx=$((idx + 1))
         done
         
+        printf "  ${BOLD}%d)${NC}  ${GREEN}Keenetic CLI (Динамическая проверка)${NC}\n" "$idx"
+        eval "item_$idx=\"DYNAMIC\""
+        idx=$((idx + 1))
+
         if [ -n "$DEFAULT_AUTH_USER" ]; then
             printf "  ${BOLD}%d)${NC}  Стандартные данные rproxy: ${CYAN}%s${NC}\n" "$idx" "$DEFAULT_AUTH_USER"
             eval "item_$idx=\"DEFAULT_AUTH\""
@@ -283,6 +331,13 @@ select_auth_interactive() {
         local user="" pass=""
         
         case "$type" in
+            DYNAMIC)
+                AUTH_RESULT_ENABLED="dynamic"
+                AUTH_RESULT_HTPASSWD=""
+                AUTH_RESULT_USER="admin"  # Заглушка
+                [ ! -x "/opt/bin/expect" ] && warn "Внимание: 'expect' не установлен. Установите командой: opkg install expect"
+                return 0
+                ;;
             CUSTOM)
                 prompt "Имя пользователя: "
                 user="$REPLY"
@@ -1609,6 +1664,12 @@ do_start_service() {
     local ssh_opts="-o StrictHostKeyChecking=no -o ServerAliveInterval=10 -o ServerAliveCountMax=3 -o ConnectTimeout=10 -o ExitOnForwardFailure=yes"
     local tunnel_args="-R 0.0.0.0:$SVC_TUNNEL_PORT:$SVC_TARGET_HOST:$SVC_TARGET_PORT"
     
+    # Обратный туннель для динамической авторизации
+    if [ "$SVC_NDM_AUTH" = "dynamic" ]; then
+        start_auth_provider
+        tunnel_args="$tunnel_args -R 7979:localhost:7979"
+    fi
+    
     # Мониторинг порт для autossh (20000 + случайное число)
     local mon_port=$((20000 + RANDOM % 1000))
 
@@ -1780,6 +1841,17 @@ generate_nginx_conf() {
         auth_config="
     auth_basic \"Restricted Access\";
     auth_basic_user_file /etc/nginx/rproxy_$name.htpasswd;
+    "
+    elif [ "$use_ndm_auth" = "dynamic" ]; then
+        auth_config="
+    auth_request /auth-check;
+    location = /auth-check {
+        internal;
+        proxy_pass http://127.0.0.1:7979;
+        proxy_pass_request_body off;
+        proxy_set_header Content-Length \"\";
+        proxy_set_header X-Original-URI \$request_uri;
+    }
     "
     fi
 
@@ -2206,6 +2278,9 @@ case "${1:-}" in
                 printf "  %-15s %-7s %-20s %s\n" "$SVC_NAME" "$type" "$addr" "$status"
             )
         done
+        ;;
+    _auth_handle)
+        _auth_handle
         ;;
     init-script)
         cat <<EOF > /opt/etc/init.d/S99rproxy
