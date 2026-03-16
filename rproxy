@@ -3,7 +3,7 @@
 # Публикация локальных сервисов через SSH-туннели + nginx на VPS
 # https://github.com/l-ptrol/rProxy
 
-VERSION="2.0.0-Alpha.37"
+VERSION="2.0.0-Alpha.38"
 export PATH="/opt/bin:/opt/sbin:$PATH"
 CONF_DIR="/opt/etc/rproxy"
 CONF_FILE="$CONF_DIR/rproxy.conf"
@@ -152,6 +152,11 @@ ensure_local_deps() {
     _has_cmd expect  || missing="$missing expect"
     _has_cmd pkill   || missing="$missing procps-ng-pkill"
     _has_cmd fuser   || missing="$missing psmisc"
+
+    # Проверка полноценного nc (не BusyBox)
+    if ! nc -h 2>&1 | grep -q " -l "; then
+        missing="$missing netcat"
+    fi
 
     # Проверка ss или netstat
     if ! _has_cmd ss && ! _has_cmd netstat; then
@@ -305,15 +310,24 @@ start_auth_provider() {
     fi
     [ ! -x "/opt/bin/expect" ] && { err "Пакет 'expect' не найден! Динамическая авторизация невозможна."; return 1; }
     
+    # Проверка nc на поддержку режима прослушивания (-l)
+    if ! nc -h 2>&1 | grep -q " -l "; then
+        err "Встроенный 'nc' не поддерживает прослушивание. Установите 'netcat': opkg install netcat"
+        return 1
+    fi
+
     msg "Запуск Auth Provider на порту $port..."
     rm -f "$fifo"
     mkfifo "$fifo"
     (
         while true; do
             # Классическая схема двунаправленного пайпа (nc < fifo | script > fifo)
-            # nc ждет соединения, script ждет данных от nc. 
-            # Это исключает бесконечный цикл перезапусков без нагрузки.
-            nc -l -p $port < "$fifo" | "$0" _auth_handle > "$fifo" 2>/dev/null || sleep 1
+            # Если nc вылетает, ждем 5 секунд перед рестартом (защита от флуда)
+            if ! nc -l -p $port < "$fifo" | "$0" _auth_handle > "$fifo" 2>/dev/null; then
+                sleep 5
+            else
+                sleep 0.5
+            fi
         done
     ) &
     echo $! > "$PID_DIR/auth_provider.pid"
