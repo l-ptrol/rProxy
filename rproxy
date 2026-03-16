@@ -3,7 +3,7 @@
 # Публикация локальных сервисов через SSH-туннели + nginx на VPS
 # https://github.com/l-ptrol/rProxy
 
-VERSION="2.0.0-Alpha.14"
+VERSION="2.0.0-Alpha.15"
 export PATH="/opt/bin:/opt/sbin:$PATH"
 CONF_DIR="/opt/etc/rproxy"
 CONF_FILE="$CONF_DIR/rproxy.conf"
@@ -142,6 +142,7 @@ ensure_local_deps() {
     _has_cmd ttyd    || missing="$missing ttyd"
     _has_cmd pkill   || missing="$missing procps-ng-pkill"
     _has_cmd fuser   || missing="$missing psmisc"
+    _has_cmd setsid  || missing="$missing util-linux-setsid"
 
     # Проверка ss или netstat
     if ! _has_cmd ss && ! _has_cmd netstat; then
@@ -1354,23 +1355,26 @@ start_ttyd() {
     fi
 
     if [ ! -x "$ttyd_bin" ]; then
-        err "Критическая ошибка: бинарник ttyd не найден или не имеет прав на запуск!"
+        err "Критическая ошибка: бинарник ttyd не найден!"
         return 1
     fi
 
-    msg "Запуск ttyd терминала с Watchdog..."
+    local setsid_bin=""
+    command -v setsid >/dev/null 2>&1 && setsid_bin="setsid"
+
+    msg "Запуск ttyd терминала с Watchdog (Изолированный)..."
     msg "Бинарник: $ttyd_bin"
     msg "Порт: $port"
 
     mkdir -p /opt/var/run/rproxy
 
-    # 1️⃣ Переменные окружения
-    export TERM=xterm-256color
-    export HOME=/root
-    export USER=root
-    export SHELL=/bin/sh
-    export PATH="/opt/bin:/opt/sbin:/usr/bin:/bin:$PATH"
-    export LD_LIBRARY_PATH="/opt/lib:/opt/usr/lib"
+    # 1️⃣ Переменные окружения (подготовка для env -i)
+    local e_term="TERM=xterm-256color"
+    local e_home="HOME=/root"
+    local e_user="USER=root"
+    local e_shell="SHELL=/bin/sh"
+    local e_path="PATH=/opt/bin:/opt/sbin:/usr/bin:/bin"
+    local e_ld="LD_LIBRARY_PATH=/opt/lib:/opt/usr/lib"
 
     # 2️⃣ Очистка
     [ -f "$pid_file" ] && { kill "$(cat "$pid_file")" 2>/dev/null; rm -f "$pid_file"; }
@@ -1386,17 +1390,26 @@ start_ttyd() {
         fi
     done
 
-    # 3️⃣ Watchdog Launcher
+    # 3️⃣ Watchdog Launcher (с детоксикацией окружения)
     (
         while true; do
-            # Внутренняя проверка перед запуском
             if [ -x "$ttyd_bin" ]; then
-                $ttyd_bin -W -a --max-clients 10 -i 0.0.0.0 -p "$port" $cmd >> "$log" 2>&1
+                # env -i очищает окружение, оставляя только наши переменные
+                # setsid отвязывает процесс от терминала
+                env -i "$e_term" "$e_home" "$e_user" "$e_shell" "$e_path" "$e_ld" \
+                    $setsid_bin $ttyd_bin \
+                    -W \
+                    -a \
+                    --max-clients 10 \
+                    -i 0.0.0.0 \
+                    -p "$port" \
+                    $cmd \
+                    >> "$log" 2>&1
             else
                 echo "$(date) Error: ttyd lost during runtime!" >> "$log"
                 exit 1
             fi
-            echo "$(date) ttyd stopped, restarting in 2s..." >> "$log"
+            echo "$(date) ttyd stopped (exit code $?), restarting in 2s..." >> "$log"
             sleep 2
         done
     ) &
@@ -1405,15 +1418,26 @@ start_ttyd() {
     echo "$watchdog_pid" > "$pid_file"
 
     # 4️⃣ Верификация старта
-    sleep 3
-    if _is_port_busy "$port"; then
+    msg "Верификация запуска..."
+    local start_ok=0
+    for i in 1 2 3 4 5; do
+        if _is_port_busy "$port"; then
+            start_ok=1
+            break
+        fi
+        sleep 1
+    done
+
+    if [ $start_ok -eq 1 ]; then
         msg "ttyd успешно запущен (Watchdog PID $watchdog_pid)"
         return 0
     else
-        err "ttyd не смог открыть порт за 3 секунды. Отмена."
+        err "ttyd не смог открыть порт за 5 секунд. Отмена."
         kill "$watchdog_pid" 2>/dev/null
         rm -f "$pid_file"
-        [ -s "$log" ] && tail -n 10 "$log"
+        # Убиваем возможные остатки процесса
+        pkill -9 -f "ttyd.*-p $port" >/dev/null 2>&1
+        [ -s "$log" ] && tail -n 15 "$log"
         return 1
     fi
 }
