@@ -43,6 +43,12 @@ curl -sSL https://raw.githubusercontent.com/l-ptrol/rProxy/main/install.sh | sh
 rproxy
 ```
 
+### 4. Удаление системы
+Если вы решите удалить rProxy, выполните команду:
+```bash
+curl -sSL https://raw.githubusercontent.com/l-ptrol/rProxy/main/uninstall.sh | sh
+```
+
 ## 📋 Основные функции меню
 
 1.  **📋 Список сервисов**: Визуальный мониторинг статуса (Online/Offline), доменов и портов.
