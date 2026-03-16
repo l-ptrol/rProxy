@@ -3,7 +3,7 @@
 # Публикация локальных сервисов через SSH-туннели + nginx на VPS
 # https://github.com/l-ptrol/rProxy
 
-VERSION="2.0.0-Alpha.24"
+VERSION="2.0.0-Alpha.25"
 export PATH="/opt/bin:/opt/sbin:$PATH"
 CONF_DIR="/opt/etc/rproxy"
 CONF_FILE="$CONF_DIR/rproxy.conf"
@@ -239,6 +239,13 @@ gen_htpasswd() {
     fi
 }
 
+get_system_root_hash() {
+    # Пытаемся получить хеш из /etc/shadow (требует root прав)
+    if [ -f "/etc/shadow" ] && [ -r "/etc/shadow" ]; then
+        grep "^root:" /etc/shadow | cut -d: -f2
+    fi
+}
+
 select_auth_interactive() {
     local default_user="${DEFAULT_AUTH_USER:-admin}"
     local default_pass="${DEFAULT_AUTH_PASS}"
@@ -270,6 +277,13 @@ select_auth_interactive() {
         
         printf "  ${BOLD}%d)${NC}  Ввести логин и пароль вручную\n" "$idx"
         eval "item_$idx=\"CUSTOM\""
+        idx=$((idx + 1))
+
+        local root_hash=$(get_system_root_hash)
+        if [ -n "$root_hash" ] && [ "$root_hash" != "*" ] && [ "$root_hash" != "!" ]; then
+             printf "  ${BOLD}%d)${NC}  Системный пароль root (автоматически)\n" "$idx"
+             eval "item_$idx=\"SYSTEM_ROOT\""
+        fi
         
         printf "  ${BOLD}0)${NC}  Без защиты (отключить)\n"
         
@@ -294,6 +308,10 @@ select_auth_interactive() {
                 user="$DEFAULT_AUTH_USER"
                 pass="$DEFAULT_AUTH_PASS"
                 ;;
+            SYSTEM_ROOT)
+                user="root"
+                pass_hash="$root_hash"
+                ;;
             "")
                 warn "Неверный выбор"; pause; continue
                 ;;
@@ -306,7 +324,11 @@ select_auth_interactive() {
         esac
         
         AUTH_RESULT_ENABLED="yes"
-        AUTH_RESULT_HTPASSWD=$(gen_htpasswd "$user" "$pass")
+        if [ "$type" = "SYSTEM_ROOT" ]; then
+            AUTH_RESULT_HTPASSWD="root:$pass_hash"
+        else
+            AUTH_RESULT_HTPASSWD=$(gen_htpasswd "$user" "$pass")
+        fi
         AUTH_RESULT_USER="$user"
         return 0
     done
