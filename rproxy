@@ -3,7 +3,7 @@
 # Публикация локальных сервисов через SSH-туннели + nginx на VPS
 # https://github.com/l-ptrol/rProxy
 
-VERSION="2.0.0-Alpha.21"
+VERSION="2.0.0-Alpha.22"
 export PATH="/opt/bin:/opt/sbin:$PATH"
 CONF_DIR="/opt/etc/rproxy"
 CONF_FILE="$CONF_DIR/rproxy.conf"
@@ -497,7 +497,7 @@ build_ttyd_command_interactive() {
                 prompt "Пользователь [root]: "
                 local user="${REPLY:-root}"
                 # Максимально простая и надежная команда
-                TTYD_CMD_RESULT="$ssh_bin -tt -p $port $user@localhost"
+                TTYD_CMD_RESULT="$ssh_bin -tt -o StrictHostKeyChecking=no -p $port $user@127.0.0.1"
                 break
                 ;;
             0) return 1 ;;
@@ -1367,14 +1367,11 @@ start_ttyd() {
 
     mkdir -p /opt/var/run/rproxy
 
-    # 1️⃣ Переменные окружения (подготовка для env -i)
-    local e_term="TERM=xterm-256color"
-    local e_home="HOME=/root"
-    local e_user="USER=root"
-    local e_shell="SHELL=/bin/sh"
-    local e_path="PATH=/opt/bin:/opt/sbin:/usr/bin:/bin"
-    local e_lang="LANG=en_US.UTF-8"
-    local e_lc="LC_ALL=en_US.UTF-8"
+    # 1️⃣ Проверка доступности порта
+    if _is_port_busy "$port"; then
+        warn "Порт $port уже занят, ttyd не может быть запущен."
+        return 1
+    fi
 
     # 2️⃣ Агрессивная очистка
     [ -f "$pid_file" ] && { kill -TERM "$(cat "$pid_file")" 2>/dev/null; rm -f "$pid_file"; }
@@ -1391,13 +1388,8 @@ start_ttyd() {
         
         while true; do
             if [ -x "$ttyd_bin" ]; then
-                if [ -n "$setsid_bin" ]; then
-                    env -i "$e_term" "$e_home" "$e_user" "$e_shell" "$e_path" "$e_lang" "$e_lc" \
-                        "$setsid_bin" "$ttyd_bin" -W --max-clients 10 -i 0.0.0.0 -p "$port" -- $cmd >> "$log" 2>&1
-                else
-                    env -i "$e_term" "$e_home" "$e_user" "$e_shell" "$e_path" "$e_lang" "$e_lc" \
-                        "$ttyd_bin" -W --max-clients 10 -i 0.0.0.0 -p "$port" -- $cmd >> "$log" 2>&1
-                fi
+                # Запуск без env -i и setsid для сохранения TTY/PTY
+                "$ttyd_bin" -W --max-clients 10 -i 0.0.0.0 -p "$port" -- $cmd >> "$log" 2>&1
             else
                 echo "$(date) Error: ttyd lost during runtime!" >> "$log"
                 exit 1
