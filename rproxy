@@ -239,8 +239,6 @@ gen_htpasswd() {
     fi
 }
 
-}
-
 select_auth_interactive() {
     local default_user="${DEFAULT_AUTH_USER:-admin}"
     local default_pass="${DEFAULT_AUTH_PASS}"
