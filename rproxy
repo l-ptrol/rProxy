@@ -3,18 +3,29 @@
 # Публикация локальных сервисов через SSH-туннели + nginx на VPS
 # https://github.com/l-ptrol/rProxy
 
-VERSION="1.6.9"
+VERSION="2.0.0-Alpha.45.1"
 export PATH="/opt/bin:/opt/sbin:$PATH"
 CONF_DIR="/opt/etc/rproxy"
 CONF_FILE="$CONF_DIR/rproxy.conf"
 SERVICES_DIR="$CONF_DIR/services"
 VPS_DIR="$CONF_DIR/vps"
 PID_DIR="/opt/var/run/rproxy"
+LOCK_DIR="/opt/var/lock/rproxy"
 SSH_KEY="$CONF_DIR/id_ed25519"
 REMOTE_NGINX_DIR="/etc/nginx/sites-enabled"
+REMOTE_NGINX_STREAMS_DIR="/etc/nginx/streams-enabled"
 BASE_TUNNEL_PORT=10000
 BASE_EXT_PORT=26000
+BASE_TTYD_PORT=7681
 CERTBOT_EMAIL="" # Будет заполнено из конфига
+
+next_free_local_port() {
+    local port=$BASE_TTYD_PORT
+    while netstat -tln 2>/dev/null | grep -q ":$port "; do
+        port=$((port + 1))
+    done
+    echo "$port"
+}
 
 # ─── Цвета ───────────────────────────────────────────────────────────
 RED='\033[0;31m'
@@ -40,6 +51,15 @@ draw_box() {
 
 draw_separator() {
     printf "${DIM}──────────────────────────────────────────────────${NC}\n"
+}
+
+mask_and_escape() {
+    local str="$1"
+    # Визуализируем \r, чтобы он не затирал строку в консоли
+    str=$(echo "$str" | sed 's/\r/\\r/g')
+    # Маскируем пароль в командах expect
+    str=$(echo "$str" | sed -E 's/send "[^"]+(\\r)"/send "****\\1"/g')
+    echo "$str"
 }
 
 prompt() {
@@ -84,7 +104,7 @@ load_vps() {
 }
 
 migrate_config() {
-    mkdir -p "$VPS_DIR" "$SERVICES_DIR" "$PID_DIR"
+    mkdir -p "$VPS_DIR" "$SERVICES_DIR" "$PID_DIR" "$LOCK_DIR"
     [ ! -f "$CONF_FILE" ] && touch "$CONF_FILE"
     
     # Проверка на "битый" (пустой) конфиг
@@ -128,7 +148,27 @@ ensure_local_deps() {
 
     _has_cmd openssl || missing="$missing openssl-util"
     _has_cmd curl    || missing="$missing curl"
+    _has_cmd ttyd    || missing="$missing ttyd"
+    _has_cmd expect  || missing="$missing expect"
+    _has_cmd stty    || missing="$missing coreutils-stty"
+    _has_cmd pkill   || missing="$missing procps-ng-pkill"
+    _has_cmd fuser   || missing="$missing psmisc"
     
+    # Фикс пути для stty (необходим для expect на Keenetic)
+    if [ -x "/opt/bin/stty" ] && [ ! -L "/bin/stty" ] && [ ! -f "/bin/stty" ]; then
+        msg "Настройка симлинка для stty..."
+        ln -s /opt/bin/stty /bin/stty 2>/dev/null || true
+    fi
+
+    # Проверка полноценного nc (не BusyBox)
+    if ! nc -h 2>&1 | grep -q " -l "; then
+        missing="$missing netcat"
+    fi
+
+    # Проверка ss или netstat
+    if ! _has_cmd ss && ! _has_cmd netstat; then
+        missing="$missing ip-full"
+    fi
     if [ -n "$missing" ]; then
         warn "Обнаружены недостающие пакеты:$missing"
         msg "Попытка автоматической установки через opkg..."
@@ -221,6 +261,63 @@ gen_htpasswd() {
     fi
 }
 
+# Динамическая авторизация удалена в v2.0.0-Alpha.44 для упрощения.
+
+select_auth_interactive() {
+    local default_user="${DEFAULT_AUTH_USER:-admin}"
+    local default_pass="${DEFAULT_AUTH_PASS}"
+    
+    while true; do
+        clear_screen
+        draw_box "Защита доступа (Basic Auth)"
+        printf "  Выберите метод защиты для сервиса:\n\n"
+        
+        local idx=1
+        
+        if [ -n "$DEFAULT_AUTH_USER" ]; then
+            printf "  ${BOLD}%d)${NC}  Стандартные данные rproxy: ${CYAN}%s${NC}\n" "$idx" "$DEFAULT_AUTH_USER"
+            eval "item_$idx=\"DEFAULT_AUTH\""
+            idx=$((idx + 1))
+        fi
+        
+        printf "  ${BOLD}%d)${NC}  Ввести логин и пароль вручную\n" "$idx"
+        eval "item_$idx=\"CUSTOM\""
+        
+        printf "  ${BOLD}0)${NC}  Без защиты (отключить)\n"
+        
+        prompt "Ваш выбор: "
+        [ "$REPLY" = "0" ] && { AUTH_RESULT_ENABLED="no"; AUTH_RESULT_HTPASSWD=""; return 0; }
+        
+        local choice="$REPLY"
+        local type=""
+        eval "type=\$item_$choice"
+        
+        if [ -z "$type" ]; then warn "Неверный выбор"; pause; continue; fi
+        
+        local user="" pass=""
+        
+        case "$type" in
+            CUSTOM)
+                prompt "Имя пользователя: "
+                user="$REPLY"
+                [ -z "$user" ] && { warn "Логин не может быть пустым"; pause; continue; }
+                prompt "Пароль для '$user': "
+                pass="$REPLY"
+                [ -z "$pass" ] && { warn "Пароль не может быть пустым"; pause; continue; }
+                ;;
+            DEFAULT_AUTH)
+                user="$DEFAULT_AUTH_USER"
+                pass="$DEFAULT_AUTH_PASS"
+                ;;
+        esac
+        
+        AUTH_RESULT_ENABLED="yes"
+        AUTH_RESULT_HTPASSWD=$(gen_htpasswd "$user" "$pass")
+        AUTH_RESULT_USER="$user"
+        return 0
+    done
+}
+
 next_free_ext_port() {
     local port=$BASE_EXT_PORT
     while true; do
@@ -234,12 +331,35 @@ next_free_ext_port() {
     done
 }
 
+next_free_ttyd_port() {
+    local port=$BASE_TTYD_PORT
+    while true; do
+        local used=0
+        for f in "$SERVICES_DIR"/*.conf; do
+            [ -f "$f" ] || continue
+            grep -q "SVC_TTYD_PORT=\"$port\"" "$f" && used=1 && break
+        done
+        [ "$used" -eq 0 ] && echo "$port" && return
+        port=$((port + 1))
+    done
+}
+
 get_pid_file() { echo "$PID_DIR/$1.pid"; }
 
 is_running() {
     local pf
     pf=$(get_pid_file "$1")
-    [ -f "$pf" ] && kill -0 "$(cat "$pf")" 2>/dev/null
+    if [ -f "$pf" ]; then
+        local pid
+        pid=$(cat "$pf")
+        # Проверяем, существует ли процесс и не является ли он зомби
+        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+            return 0
+        fi
+        # Если PID-файл есть, но процесса нет — удаляем битый файл
+        rm -f "$pf"
+    fi
+    return 1
 }
 
 count_services() {
@@ -248,6 +368,31 @@ count_services() {
         [ -f "$f" ] && count=$((count + 1))
     done
     echo $count
+}
+
+do_hard_cleanup() {
+    draw_box "Глубокая очистка (Hard Reset)"
+    warn "Это действие ПРИНУДИТЕЛЬНО остановит все процессы ttyd и rproxy."
+    warn "Используйте это, если терминал не принимает ввод или завис."
+    prompt "Продолжить? (y/n): "
+    [ "$REPLY" != "y" ] && { msg "Отменено"; return; }
+
+    msg "Останавливаю все настроенные сервисы..."
+    do_stop_all 2>/dev/null
+
+    msg "Принудительное уничтожение процессов ttyd..."
+    killall ttyd 2>/dev/null
+    pkill -9 -f ttyd 2>/dev/null
+
+    msg "Принудительное уничтожение фоновых процессов rproxy (Watchdog)..."
+    pkill -9 -f "rproxy.*ttyd" 2>/dev/null
+
+    msg "Очистка временных файлов и логов..."
+    rm -f /tmp/rproxy_ttyd_*.log
+    rm -rf /opt/var/run/rproxy/*
+    
+    msg "Глубокая очистка завершена!"
+    pause
 }
 
 # ══════════════════════════════════════════════════════════════════════
@@ -304,6 +449,7 @@ main_menu() {
         printf "  ${BOLD}9)${NC}  ⚙️   Настройки VPS\n"
         printf "  ${BOLD}10)${NC} 🚀  Обновить rProxy\n"
         printf "  ${BOLD}11)${NC} 🏥  Проверка VPS (Health)\n"
+        printf "  ${BOLD}99)${NC} ☢️   Глубокая очистка (Hard Reset)\n"
         printf "  ${BOLD}0)${NC}  🚪  Выход\n"
 
         prompt "Выберите действие: "
@@ -320,6 +466,7 @@ main_menu() {
             9) do_setup ;;
             10) do_self_update ;;
             11) do_health_check ;;
+            99) do_hard_cleanup ;;
             0|q) clear_screen; exit 0 ;;
             *) ;;
         esac
@@ -442,6 +589,36 @@ select_vps_interactive() {
     done
 }
 
+build_ttyd_command_interactive() {
+    local current_cmd="$1"
+    TTYD_CMD_RESULT=""
+    
+    local has_expect=0
+    [ -x "/opt/bin/expect" ] && has_expect=0 # Removed for simplification
+
+    while true; do
+        clear_screen
+        draw_box "Конструктор команды терминала"
+        [ -n "$current_cmd" ] && printf "  Текущая команда: ${CYAN}%s${NC}\n\n" "$(mask_and_escape "$current_cmd")"
+        
+        printf "  Выберите тип терминала:\n"
+        printf "  ${BOLD}1)${NC}  Системный вход (login) — Linux Shell\n"
+        printf "  ${BOLD}2)${NC}  Прямая оболочка (sh) — Без пароля\n"
+        printf "  ${BOLD}0)${NC}  Отмена\n"
+        
+        prompt "Ваш выбор: "
+        case "$REPLY" in
+            1) TTYD_CMD_RESULT="login"; break ;;
+            2) TTYD_CMD_RESULT="sh"; break ;;
+            0) return 1 ;;
+            *) warn "Неверный выбор" ;;
+        esac
+    done
+    
+    return 0
+}
+
+
 # ══════════════════════════════════════════════════════════════════════
 # ДОБАВИТЬ СЕРВИС (интерактивно)
 # ══════════════════════════════════════════════════════════════════════
@@ -449,6 +626,7 @@ do_add_interactive() {
     local step=1
     local name="" target="" mode="" domain="" ext_port="" use_ssl="no" vps_id="" 
     local use_ndm_auth="no" htpasswd_line=""
+    local svc_type="http" # http, tcp, ttyd
 
     while [ "$step" -gt 0 ]; do
         clear_screen
@@ -471,37 +649,66 @@ do_add_interactive() {
                 fi
                 ;;
             2)
-                printf "  Название: ${CYAN}%s${NC}\n" "$name"
-                prompt "Адрес локального сервиса (например, 127.0.0.1:8080): "
+                printf "  Название: ${CYAN}%s${NC}\n\n" "$name"
+                printf "  ${BOLD}Тип сервиса:${NC}\n"
+                printf "  ${BOLD}1)${NC} Веб (HTTP) — сайты, панели управления\n"
+                printf "  ${BOLD}2)${NC} Порт (TCP) — SSH (22), БД, сырой трафик\n"
+                printf "  ${BOLD}3)${NC} Терминал (ttyd) — доступ к консоли через браузер\n"
+                prompt "Выберите [1]: "
                 [ "$REPLY" = "0" ] && { step=1; continue; }
+                case "${REPLY:-1}" in
+                    1) svc_type="http" ;;
+                    2) svc_type="tcp" ;;
+                    3) svc_type="ttyd" ;;
+                    *) warn "Неверный выбор"; pause; continue ;;
+                esac
+                step=3
+                ;;
+            3)
+                printf "  Название: ${CYAN}%s${NC}\n" "$name"
+                printf "  Тип:      ${CYAN}%s${NC}\n\n" "$svc_type"
+                
+                if [ "$svc_type" = "ttyd" ]; then
+                    local ttyd_port=$(next_free_ttyd_port)
+                    target="127.0.0.1:$ttyd_port"
+                    msg "Будет использован встроенный ttyd (порт $ttyd_port)"
+                    if build_ttyd_command_interactive; then
+                        ttyd_cmd="$TTYD_CMD_RESULT"
+                        SVC_TTYD_PORT="$ttyd_port"
+                        step=4
+                    else
+                        step=2
+                    fi
+                    continue
+                fi
+
+                prompt "Адрес локального сервиса (например, 127.0.0.1:8080): "
+                [ "$REPLY" = "0" ] && { step=2; continue; }
                 target="$REPLY"
                 if [ -z "$target" ]; then
                     warn "Адрес не может быть пустым."
                     pause
-                else
-                    step=3
+                    continue
                 fi
+                step=4
                 ;;
-            3)
+            4)
                 printf "  Название: ${CYAN}%s${NC}\n" "$name"
-                printf "  Цель:     ${CYAN}%s${NC}\n\n" "$target"
+                printf "  Цель:     ${CYAN}%s${NC}\n" "$target"
+                printf "  Тип:      ${CYAN}%s${NC}\n\n" "$svc_type"
+                
                 printf "  Привязать к домену?\n"
                 printf "  ${BOLD}1)${NC} Да — указать доменное имя (порт 443)\n"
                 printf "  ${BOLD}2)${NC} Нет — указать внешний порт\n"
                 prompt "Выберите [2]: "
-                [ "$REPLY" = "0" ] && { step=2; continue; }
+                [ "$REPLY" = "0" ] && { step=3; continue; }
                 mode="${REPLY:-2}"
-                if [ "$mode" = "1" ] || [ "$mode" = "2" ]; then
-                    step=4
-                else
-                    warn "Неверный выбор."
-                    pause
-                fi
+                step=5
                 ;;
-            4)
+            5)
                 if [ "$mode" = "1" ]; then
                     prompt "Доменное имя (например, mysite.example.com): "
-                    [ "$REPLY" = "0" ] && { step=3; continue; }
+                    [ "$REPLY" = "0" ] && { step=4; continue; }
                     domain=$(echo "$REPLY" | tr '[:upper:]' '[:lower:]')
                     if [ -z "$domain" ]; then
                         warn "Домен не указан."
@@ -509,20 +716,27 @@ do_add_interactive() {
                         continue
                     fi
                     
+                    ext_port=443
+                    prompt "Внешний порт [$ext_port]: "
+                    [ "$REPLY" = "0" ] && { step=5; continue; }
+                    ext_port="${REPLY:-$ext_port}"
+
                     local conflict=""
                     for f in "$SERVICES_DIR"/*.conf; do
                         [ -f "$f" ] || continue
-                        if grep -q "SVC_DOMAIN=\"$domain\"" "$f"; then
+                        local c_domain=$(grep "SVC_DOMAIN=" "$f" | cut -d'"' -f2)
+                        local c_port=$(grep "SVC_EXT_PORT=" "$f" | cut -d'"' -f2)
+                        if [ "$c_domain" = "$domain" ] && [ "$c_port" = "$ext_port" ]; then
                             conflict=$(basename "$f" .conf)
                             break
                         fi
                     done
                     
                     if [ -n "$conflict" ]; then
-                        err "Домен '$domain' уже используется сервисом '$conflict'"
+                        err "Домен '$domain' на порту '$ext_port' уже используется сервисом '$conflict'"
                         pause
                     else
-                        use_ssl="yes"; ext_port=443
+                        use_ssl="yes"
                         if [ -z "$CERTBOT_EMAIL" ]; then
                             prompt "Введите Email для Certbot: "
                             [ "$REPLY" = "0" ] && continue # Переспросит домен
@@ -530,19 +744,19 @@ do_add_interactive() {
                             sed -i "/CERTBOT_EMAIL=/d" "$CONF_FILE"
                             echo "CERTBOT_EMAIL=\"$CERTBOT_EMAIL\"" >> "$CONF_FILE"
                         fi
-                        step=5
+                        step=6
                     fi
                 else
                     ext_port=$(next_free_ext_port)
                     prompt "Внешний порт [$ext_port]: "
-                    [ "$REPLY" = "0" ] && { step=3; continue; }
+                    [ "$REPLY" = "0" ] && { step=4; continue; }
                     ext_port="${REPLY:-$ext_port}"
                     domain=""
                     use_ssl="no"
-                    step=5
+                    step=6
                 fi
                 ;;
-            5)
+            6)
                 # Автоопределение VPS если домен
                 if [ -n "$domain" ] && [ -z "$vps_id" ]; then
                     msg "Проверяю куда направлен домен $domain..."
@@ -556,60 +770,30 @@ do_add_interactive() {
                 if [ -n "$vps_id" ]; then
                     printf "  Выбран VPS: ${CYAN}%s${NC}\n" "$vps_id"
                     prompt "Изменить VPS? (д/н) [н]: "
-                    [ "$REPLY" = "0" ] && { step=4; continue; }
+                    [ "$REPLY" = "0" ] && { step=5; continue; }
                     if [ "${REPLY:-н}" = "д" ] || [ "${REPLY:-н}" = "y" ]; then
                         vps_id=""
                     fi
                 fi
 
                 if [ -z "$vps_id" ]; then
-                    select_vps_interactive || { step=4; continue; }
+                    select_vps_interactive || { step=5; continue; }
                     vps_id="$SELECTED_VPS_ID"
                 fi
                 
-                [ -n "$vps_id" ] && step=6
-                ;;
-            6)
-                prompt "Защитить сервис паролем? (д/н) [н]: "
-                [ "$REPLY" = "0" ] && { step=5; continue; }
-                case "$REPLY" in
-                    д|Д|y|Y|да|yes) 
-                        use_ndm_auth="yes"
-                        local def_user="${DEFAULT_AUTH_USER:-admin}"
-                        
-                        if [ -n "$DEFAULT_AUTH_PASS" ]; then
-                            printf "  ${DIM}Будут использованы сохраненные данные: $def_user / *****${NC}\n"
-                            prompt "Использовать их? (д/н) [д]: "
-                            if [ "${REPLY:-д}" = "д" ] || [ "${REPLY:-д}" = "y" ]; then
-                                htpasswd_line=$(gen_htpasswd "$def_user" "$DEFAULT_AUTH_PASS")
-                                step=7
-                                continue
-                            fi
-                        fi
-
-                        prompt "Введите имя пользователя [$def_user]: "
-                        [ "$REPLY" = "0" ] && { use_ndm_auth="no"; continue; }
-                        local user="${REPLY:-$def_user}"
-                        prompt "Введите пароль для '$user': "
-                        [ "$REPLY" = "0" ] && continue
-                        local pass="$REPLY"
-                        if [ -z "$pass" ]; then
-                             warn "Пароль не может быть пустым."
-                             pause
-                             continue
-                        fi
-                        htpasswd_line=$(gen_htpasswd "$user" "$pass")
-                        step=7
-                        ;;
-                    *)
-                        use_ndm_auth="no"
-                        htpasswd_line=""
-                        step=7
-                        ;;
-                esac
+                [ -n "$vps_id" ] && step=7
                 ;;
             7)
-                load_vps "$vps_id" || { err "Ошибка загрузки VPS"; step=5; continue; }
+                if select_auth_interactive; then
+                    use_ndm_auth="$AUTH_RESULT_ENABLED"
+                    htpasswd_line="$AUTH_RESULT_HTPASSWD"
+                    step=8
+                else
+                    step=6
+                fi
+                ;;
+            8)
+                load_vps "$vps_id" || { err "Ошибка загрузки VPS"; step=6; continue; }
                 local t_host="${target%:*}"
                 local t_port="${target#*:}"
                 [ "$t_host" = "$t_port" ] && { t_port="$t_host"; t_host="127.0.0.1"; }
@@ -622,11 +806,12 @@ do_add_interactive() {
                 printf "  ${BOLD}Туннель:${NC}       порт $tunnel_port\n"
                 [ -n "$domain" ] && printf "  ${BOLD}Домен:${NC}         $domain\n"
                 printf "  ${BOLD}Внешний порт:${NC}  $ext_port\n"
+                printf "  ${BOLD}Тип прокси:${NC}    $svc_type\n"
                 printf "  ${BOLD}Авторизация:${NC}   $use_ndm_auth\n"
                 draw_separator
 
                 prompt "Всё верно? Добавить сервис? (д/н) [д]: "
-                if [ "$REPLY" = "0" ]; then step=6; continue; fi
+                if [ "$REPLY" = "0" ]; then step=7; continue; fi
                 if [ "${REPLY:-д}" != "д" ] && [ "${REPLY:-д}" != "y" ]; then
                     msg "Отменено"
                     pause
@@ -635,7 +820,25 @@ do_add_interactive() {
 
                 msg "Добавляю сервис '$name'..."
                 local tmp="/tmp/rproxy_$name.conf"
-                generate_nginx_conf "$name" "$t_host" "$t_port" "$tunnel_port" "$domain" "$ext_port" "$use_ndm_auth" "$tmp"
+                local remote_path="$REMOTE_NGINX_DIR/rproxy_$name.conf"
+                
+                if [ "$svc_type" = "tcp" ]; then
+                    generate_nginx_stream_conf "$name" "$tunnel_port" "$ext_port" "$tmp" "$domain"
+                    remote_path="$REMOTE_NGINX_STREAMS_DIR/rproxy_$name.conf"
+                    # Гарантируем наличие директории и инклуда в nginx.conf
+                    ssh_cmd "
+                        mkdir -p $REMOTE_NGINX_STREAMS_DIR
+                        if ! grep -q 'streams-enabled' /etc/nginx/nginx.conf; then
+                            if grep -q 'stream {' /etc/nginx/nginx.conf; then
+                                echo 'include $REMOTE_NGINX_STREAMS_DIR/*.conf;' >> /etc/nginx/nginx.conf
+                            else
+                                printf '\nstream {\n    include $REMOTE_NGINX_STREAMS_DIR/*.conf;\n}\n' >> /etc/nginx/nginx.conf
+                            fi
+                        fi
+                    " >/dev/null 2>&1
+                else
+                    generate_nginx_conf "$name" "$t_host" "$t_port" "$tunnel_port" "$domain" "$ext_port" "$use_ndm_auth" "$tmp" "$svc_type"
+                fi
 
                 if [ "$use_ndm_auth" = "yes" ]; then
                     local ht_tmp="/tmp/rproxy_$name.htpasswd"
@@ -644,13 +847,58 @@ do_add_interactive() {
                     rm -f "$ht_tmp"
                 fi
 
-                scp_cmd "$tmp" "$VPS_USER@$VPS_HOST:$REMOTE_NGINX_DIR/rproxy_$name.conf" || { err "Ошибка деплоя nginx"; rm -f "$tmp"; pause; step=7; continue; }
+                # Радикальное изменение: сначала ВСЕГДА деплоим конфиг БЕЗ SSL, даже если он выбран.
+                # Это нужно, чтобы Nginx на VPS корректно запустился и Certbot смог пройти проверку домена.
+                generate_nginx_conf "$name" "$t_host" "$t_port" "$tunnel_port" "$domain" "$ext_port" "$use_ndm_auth" "$tmp" "no" "$svc_type"
+                
+                scp_cmd "$tmp" "$VPS_USER@$VPS_HOST:$remote_path" || { err "Ошибка деплоя nginx"; rm -f "$tmp"; pause; step=8; continue; }
                 rm -f "$tmp"
-                ssh_cmd "nginx -t && systemctl reload nginx" >/dev/null 2>&1
+                msg "Перезапуск Nginx на VPS..."
+                ssh_cmd "nginx -t" || { err "Ошибка конфигурации Nginx на VPS!"; return 1; }
+ssh_cmd "systemctl reload nginx"
 
                 if [ "$use_ssl" = "yes" ]; then
-                    msg "Получаю SSL через Certbot (может занять время)..."
-                    ssh_cmd "certbot --nginx -d $domain --non-interactive --agree-tos -m $CERTBOT_EMAIL" || warn "Certbot вернул ошибку"
+                    msg "Проверяю наличие SSL для $domain на VPS..."
+                    if check_remote_ssl "$domain"; then
+                        msg "Обнаружен существующий сертификат для $domain! Использую его."
+                        if [ "$svc_type" = "tcp" ]; then
+                            generate_nginx_stream_conf "$name" "$tunnel_port" "$ext_port" "$tmp" "$domain"
+                        else
+                            generate_nginx_conf "$name" "$t_host" "$t_port" "$tunnel_port" "$domain" "$ext_port" "$use_ndm_auth" "$tmp" "yes" "$svc_type"
+                        fi
+                        scp_cmd "$tmp" "$VPS_USER@$VPS_HOST:$remote_path"
+                        ssh_cmd "nginx -t" || { err "Ошибка конфигурации Nginx на VPS!"; return 1; }
+ssh_cmd "systemctl reload nginx"
+                    else
+                        msg "Получаю SSL через Certbot (может занять время)..."
+                        # Для TCP через домен Certbot должен работать через 80 порт (http-01)
+                        # Поэтому перед certbot должен быть временный http конфиг, но в do_add_interactive 
+                        # мы уже задеплоили начальный конфиг (в generate_nginx_stream_conf без SSL если нет domain? нет, там всегда ssl если domain).
+                        # Хм, для TCP домена нужно сначала поднять 80 порт для проверки.
+                        if [ "$svc_type" = "tcp" ]; then
+                             # Временный HTTP конфиг для проверки домена через Certbot
+                             cat > "$tmp" << EOF
+server {
+    listen 80;
+    server_name $domain;
+    location /.well-known/acme-challenge/ {
+        root /var/www/html;
+    }
+}
+EOF
+                             scp_cmd "$tmp" "$VPS_USER@$VPS_HOST:$REMOTE_NGINX_DIR/certbot_temp_$name.conf"
+                             ssh_cmd "mkdir -p /var/www/html && nginx -t && systemctl reload nginx"
+                             ssh_cmd "certbot certonly --webroot -w /var/www/html -d $domain --non-interactive --agree-tos -m $CERTBOT_EMAIL" || warn "Certbot вернул ошибку"
+                             ssh_cmd "rm -f $REMOTE_NGINX_DIR/certbot_temp_$name.conf && systemctl reload nginx"
+                             
+                             # Теперь деплоим финальный TCP SSL конфиг
+                             generate_nginx_stream_conf "$name" "$tunnel_port" "$ext_port" "$tmp" "$domain"
+                             scp_cmd "$tmp" "$VPS_USER@$VPS_HOST:$remote_path"
+                             ssh_cmd "nginx -t && systemctl reload nginx" >/dev/null 2>&1
+                        else
+                             ssh_cmd "certbot --nginx -d $domain --non-interactive --agree-tos -m $CERTBOT_EMAIL" || warn "Certbot вернул ошибку"
+                        fi
+                    fi
                 fi
 
                 {
@@ -664,6 +912,11 @@ do_add_interactive() {
                     printf 'SVC_SSL="%s"\n' "$use_ssl"
                     printf 'SVC_NDM_AUTH="%s"\n' "$use_ndm_auth"
                     printf "SVC_HTPASSWD='%s'\n" "$htpasswd_line"
+                    printf 'SVC_TYPE="%s"\n' "$svc_type"
+                    if [ "$svc_type" = "ttyd" ]; then
+                        [ -n "$ttyd_cmd" ] && printf 'SVC_TTYD_CMD="%s"\n' "$ttyd_cmd"
+                        printf 'SVC_TTYD_PORT="%s"\n' "$SVC_TTYD_PORT"
+                    fi
                     printf 'SVC_ENABLED="yes"\n'
                 } > "$SERVICES_DIR/$name.conf"
 
@@ -713,18 +966,35 @@ do_ssl_interactive() {
         warn "Не удалось автоматически установить Certbot на VPS"
     }
 
-    msg "Запрашиваю сертификат для $SVC_DOMAIN..."
-    if ssh_cmd "certbot --nginx -d $SVC_DOMAIN --non-interactive --agree-tos -m $CERTBOT_EMAIL"; then
-        msg "SSL сертификат успешно получен!"
-        # Обновляем конфиг сервиса
-        sed -i "s/SVC_SSL=.*/SVC_SSL=\"yes\"/" "$SERVICES_DIR/$name.conf"
-        sed -i "s/SVC_EXT_PORT=.*/SVC_EXT_PORT=\"443\"/" "$SERVICES_DIR/$name.conf"
+    msg "Проверяю наличие SSL для $SVC_DOMAIN на VPS..."
+    if check_remote_ssl "$SVC_DOMAIN"; then
+        msg "Обнаружен существующий сертификат! Перенастраиваю Nginx..."
+        local tmp="/tmp/rproxy_ssl_$name.conf"
+        local remote_path="$REMOTE_NGINX_DIR/rproxy_$name.conf"
         
-        # Проверка автопродления (добавляем таймер/крон если нет)
-        ssh_cmd "systemctl is-active certbot.timer >/dev/null 2>&1 || (crontab -l 2>/dev/null | grep -q certbot || (crontab -l 2>/dev/null; echo \"0 0,12 * * * certbot renew -q\") | crontab -)"
+        if [ "$SVC_TYPE" = "tcp" ]; then
+            generate_nginx_stream_conf "$name" "$SVC_TUNNEL_PORT" "$SVC_EXT_PORT" "$tmp" "$SVC_DOMAIN"
+            remote_path="$REMOTE_NGINX_STREAMS_DIR/rproxy_$name.conf"
+        else
+            generate_nginx_conf "$name" "$SVC_TARGET_HOST" "$SVC_TARGET_PORT" "$SVC_TUNNEL_PORT" "$SVC_DOMAIN" "$SVC_EXT_PORT" "$SVC_NDM_AUTH" "$tmp" "yes" "$SVC_TYPE"
+        fi
+
+        scp_cmd "$tmp" "$VPS_USER@$VPS_HOST:$remote_path"
+        rm -f "$tmp"
+        ssh_cmd "nginx -t" || { err "Ошибка конфигурации Nginx на VPS!"; return 1; }
+ssh_cmd "systemctl reload nginx"
+        msg "Nginx обновлен для использования существующего SSL."
+        sed -i "s/SVC_SSL=.*/SVC_SSL=\"yes\"/" "$SERVICES_DIR/$name.conf"
     else
-        err "Certbot не смог выпустить сертификат"
-        warn "Убедитесь, что домен $SVC_DOMAIN указывает на этот VPS и порт 80 открыт"
+        msg "Запрашиваю новый сертификат для $SVC_DOMAIN..."
+        if ssh_cmd "certbot --nginx -d $SVC_DOMAIN --non-interactive --agree-tos -m $CERTBOT_EMAIL"; then
+            msg "SSL сертификат успешно получен!"
+            sed -i "s/SVC_SSL=.*/SVC_SSL=\"yes\"/" "$SERVICES_DIR/$name.conf"
+            ssh_cmd "systemctl is-active certbot.timer >/dev/null 2>&1 || (crontab -l 2>/dev/null | grep -q certbot || (crontab -l 2>/dev/null; echo \"0 0,12 * * * certbot renew -q\") | crontab -)"
+        else
+            err "Certbot не смог выпустить сертификат"
+            warn "Убедитесь, что домен $SVC_DOMAIN указывает на этот VPS и порт 80 открыт"
+        fi
     fi
     pause
 }
@@ -737,25 +1007,20 @@ do_self_update() {
     draw_box "Обновление rProxy"
     printf "\n"
     
-    printf "  Выберите ветку для обновления:\n"
-    printf "  ${BOLD}1)${NC}  Основная (стабильная)\n"
-    printf "  ${BOLD}2)${NC}  Тестовая (Custom Ports Beta)\n"
+    printf "  Выберите версию для обновления:\n"
+    printf "  ${BOLD}1)${NC}  Стабильная (ветка main)\n"
+    printf "  ${BOLD}2)${NC}  Тестовая (ветка test-custom-ports)\n"
     printf "  ${BOLD}0)${NC}  Отмена\n"
-    draw_separator
     
-    prompt "Ваш выбор: "
+    prompt "Выберите вариант: "
     local branch="main"
     case "$REPLY" in
         1) branch="main" ;;
-        2) 
-            branch="test-custom-ports"
-            warn "Вы выбрали тестовую ветку. Она может содержать ошибки!"
-            ;;
-        0) return ;;
-        *) warn "Неверный выбор"; pause; return ;;
+        2) branch="test-custom-ports" ;;
+        0|*) return ;;
     esac
 
-    msg "Проверяю наличие обновлений из ветки '$branch'..."
+    msg "Проверяю наличие обновлений в ветке '$branch'..."
     
     local url="https://raw.githubusercontent.com/l-ptrol/rProxy/$branch/rproxy"
     local tmp_file="/tmp/rproxy_update"
@@ -768,10 +1033,10 @@ do_self_update() {
              pause
              exec /opt/bin/rproxy # Перезапуск новой версии
         else
-             err "Файл обновления пуст или не найден в ветке '$branch'"
+             err "Файл обновления пуст или не найден"
         fi
     else
-        err "Не удалось загрузить обновление из ветки '$branch'"
+        err "Не удалось загрузить обновление"
     fi
     pause
 }
@@ -826,7 +1091,7 @@ do_health_check() {
     printf "\n"
     msg "Утилиты на роутере:"
     [ -x "/opt/bin/ssh" ] && printf "  SSH:          ${GREEN}Entware OK${NC}\n" || printf "  SSH:          ${RED}Missing${NC}\n"
-    [ -x "/opt/bin/autossh" ] && printf "  AutoSSH:      ${GREEN}OK${NC}\n" || printf "  AutoSSH:      ${RED}Missing${NC}\n"
+    [ -x "/opt/bin/autossh" ] && printf "  AutoSSH:      ${GREEN}OK${NC}\n" || printf "  SSH:          ${RED}Missing${NC}\n"
     
     pause
 }
@@ -857,30 +1122,22 @@ do_remove_interactive() {
                 load_service "$name" || exit 1
                 is_running "$name" && do_stop_service "$name"
 
-                ssh_cmd "rm -f $REMOTE_NGINX_DIR/rproxy_$name.conf /etc/nginx/rproxy_$name.htpasswd && nginx -t && systemctl reload nginx" >/dev/null 2>&1
+                ssh_cmd "rm -f $REMOTE_NGINX_DIR/rproxy_$name.conf $REMOTE_NGINX_STREAMS_DIR/rproxy_$name.conf /etc/nginx/rproxy_$name.htpasswd"
+                ssh_cmd "nginx -t" && ssh_cmd "systemctl reload nginx"
                 rm -f "$SERVICES_DIR/$name.conf"
                 rm -f "$(get_pid_file "$name")"
             )
+            msg "Сервис '$name' удалён"
         done
-        msg "Все сервисы удалены"
     else
-        # Обработка списка сервисов (один или несколько через пробел)
-        local count=$(echo "$selected" | wc -w)
-        if [ "$count" -gt 1 ]; then
-            prompt "Удалить выбранные сервисы ($selected)? (д/н) [н]: "
-            case "${REPLY:-н}" in
-                д|Д|y|Y|да|yes) ;;
-                *) msg "Отменено"; pause; return ;;
-            esac
-        fi
-
+        # Удаление выбранных сервисов
         for name in $selected; do
             msg "Удаление сервиса '$name'..."
             (
                 load_service "$name" || exit 1
                 is_running "$name" && do_stop_service "$name"
 
-                ssh_cmd "rm -f $REMOTE_NGINX_DIR/rproxy_$name.conf /etc/nginx/rproxy_$name.htpasswd && nginx -t && systemctl reload nginx" >/dev/null 2>&1
+                ssh_cmd "rm -f $REMOTE_NGINX_DIR/rproxy_$name.conf $REMOTE_NGINX_STREAMS_DIR/rproxy_$name.conf /etc/nginx/rproxy_$name.htpasswd && nginx -t && systemctl reload nginx" >/dev/null 2>&1
                 rm -f "$SERVICES_DIR/$name.conf"
                 rm -f "$(get_pid_file "$name")"
             )
@@ -924,8 +1181,40 @@ do_edit_interactive() {
             new_host="127.0.0.1"
         fi
 
+        local new_ext_port="$SVC_EXT_PORT"
+        if [ -n "$SVC_DOMAIN" ]; then
+            prompt "Новый внешний порт [$SVC_EXT_PORT] (0 - назад): "
+            [ "$REPLY" = "0" ] && continue
+            new_ext_port="${REPLY:-$SVC_EXT_PORT}"
+        fi
+
+        local new_ttyd_cmd="$SVC_TTYD_CMD"
+        if [ "$SVC_TYPE" = "ttyd" ]; then
+            if build_ttyd_command_interactive "$SVC_TTYD_CMD"; then
+                new_ttyd_cmd="$TTYD_CMD_RESULT"
+            else
+                continue
+            fi
+        fi
+
+        local new_auth_enabled="$SVC_NDM_AUTH"
+        local new_htpasswd="$SVC_HTPASSWD"
+        local auth_changed=0
+
+        printf "  Защита паролем:  ${BOLD}%s${NC}\n" "$SVC_NDM_AUTH"
+        prompt "Изменить настройки авторизации? (д/н) [н]: "
+        if [ "${REPLY:-н}" = "д" ] || [ "${REPLY:-н}" = "y" ]; then
+            if select_auth_interactive; then
+                new_auth_enabled="$AUTH_RESULT_ENABLED"
+                new_htpasswd="$AUTH_RESULT_HTPASSWD"
+                auth_changed=1
+            fi
+        fi
+
         # Если ничего не изменилось
-        if [ "$new_host" = "$SVC_TARGET_HOST" ] && [ "$new_port" = "$SVC_TARGET_PORT" ]; then
+        if [ "$new_host" = "$SVC_TARGET_HOST" ] && [ "$new_port" = "$SVC_TARGET_PORT" ] && \
+           [ "$new_ext_port" = "$SVC_EXT_PORT" ] && [ "$new_ttyd_cmd" = "$SVC_TTYD_CMD" ] && \
+           [ "$auth_changed" -eq 0 ]; then
             msg "Параметры не изменились."
             pause
             continue
@@ -933,8 +1222,12 @@ do_edit_interactive() {
 
         printf "\n"
         draw_separator
-        printf "  ${DIM}Было:${NC}   $SVC_TARGET_HOST:$SVC_TARGET_PORT\n"
-        printf "  ${GREEN}Стало:${NC}  $new_host:$new_port\n"
+        printf "  ${DIM}Было:${NC}   %s:%s (внешний: %s) Auth: %s" "$SVC_TARGET_HOST" "$SVC_TARGET_PORT" "$SVC_EXT_PORT" "$SVC_NDM_AUTH"
+        [ "$SVC_TYPE" = "ttyd" ] && printf " [CMD: %s]" "$(mask_and_escape "$SVC_TTYD_CMD")"
+        printf "\n"
+        printf "  ${GREEN}Стало:${NC}  %s:%s (внешний: %s) Auth: %s" "$new_host" "$new_port" "$new_ext_port" "$new_auth_enabled"
+        [ "$SVC_TYPE" = "ttyd" ] && printf " [CMD: %s]" "$(mask_and_escape "$new_ttyd_cmd")"
+        printf "\n"
         draw_separator
 
         prompt "Применить изменения? (д/н) [д]: "
@@ -954,38 +1247,53 @@ do_edit_interactive() {
         do_stop_service "$name"
     fi
 
-    # Обновить локальный конфиг сервиса
-    sed -i "s|SVC_TARGET_HOST=\".*\"|SVC_TARGET_HOST=\"$new_host\"|" "$SERVICES_DIR/$name.conf"
-    sed -i "s|SVC_TARGET_PORT=\".*\"|SVC_TARGET_PORT=\"$new_port\"|" "$SERVICES_DIR/$name.conf"
-
-    # Перезагружаем переменные для деплоя
-    load_service "$name"
-
-    # Перегенерация и деплой конфига Nginx на VPS
     local tmp="/tmp/rproxy_edit_$name.conf"
-    generate_nginx_conf "$name" "$SVC_TARGET_HOST" "$SVC_TARGET_PORT" "$SVC_TUNNEL_PORT" "$SVC_DOMAIN" "$SVC_EXT_PORT" "$SVC_NDM_AUTH" "$tmp"
+    local remote_path="$REMOTE_NGINX_DIR/rproxy_$name.conf"
 
-    scp_cmd "$tmp" "$VPS_USER@$VPS_HOST:$REMOTE_NGINX_DIR/rproxy_$name.conf"
+    if [ "$SVC_TYPE" = "tcp" ]; then
+        generate_nginx_stream_conf "$name" "$SVC_TUNNEL_PORT" "$new_ext_port" "$tmp" "$SVC_DOMAIN"
+        remote_path="$REMOTE_NGINX_STREAMS_DIR/rproxy_$name.conf"
+    else
+        generate_nginx_conf "$name" "$new_host" "$new_port" "$SVC_TUNNEL_PORT" "$SVC_DOMAIN" "$new_ext_port" "$new_auth_enabled" "$tmp" "$SVC_SSL" "$SVC_TYPE"
+    fi
+
+    scp_cmd "$tmp" "$VPS_USER@$VPS_HOST:$remote_path"
     rm -f "$tmp"
-    ssh_cmd "nginx -t && systemctl reload nginx" >/dev/null 2>&1
 
-    # SSL если он был настроен - восстанавливаем слушателей 443
-    if [ "$SVC_SSL" = "yes" ]; then
-        ssh_cmd "certbot --nginx -d $SVC_DOMAIN --non-interactive --agree-tos -m $CERTBOT_EMAIL" >/dev/null 2>&1
+    # Обработка .htpasswd
+    if [ "$new_auth_enabled" = "yes" ] && [ "$auth_changed" -eq 1 ]; then
+        local ht_tmp="/tmp/rproxy_edit_$name.htpasswd"
+        echo "$new_htpasswd" > "$ht_tmp"
+        scp_cmd "$ht_tmp" "$VPS_USER@$VPS_HOST:/etc/nginx/rproxy_$name.htpasswd"
+        rm -f "$ht_tmp"
     fi
-
-    # Обновление htpasswd на VPS если включено
-    if [ "$SVC_NDM_AUTH" = "yes" ]; then
-         ssh_cmd "printf '%s\n' '$SVC_HTPASSWD' > /etc/nginx/rproxy_$name.htpasswd"
+    # Если отключили авторизацию - удаляем файл на VPS (опционально, но лучше для чистоты)
+    if [ "$new_auth_enabled" = "no" ] && [ "$SVC_NDM_AUTH" = "yes" ]; then
+        ssh_cmd "rm -f /etc/nginx/rproxy_$name.htpasswd"
     fi
+    ssh_cmd "nginx -t" || { err "Ошибка конфигурации Nginx на VPS!"; return 1; }
+ssh_cmd "systemctl reload nginx"
 
-    # Перезапустить туннель если он был запущен
-        if [ "$was_running" -eq 1 ]; then
-            do_start_service "$name"
+    # Обновляем конфиг локально
+    sed -i "s/SVC_TARGET_HOST=.*/SVC_TARGET_HOST=\"$new_host\"/" "$SERVICES_DIR/$name.conf"
+    sed -i "s/SVC_TARGET_PORT=.*/SVC_TARGET_PORT=\"$new_port\"/" "$SERVICES_DIR/$name.conf"
+    sed -i "s/SVC_EXT_PORT=.*/SVC_EXT_PORT=\"$new_ext_port\"/" "$SERVICES_DIR/$name.conf"
+    sed -i "s/SVC_NDM_AUTH=.*/SVC_NDM_AUTH=\"$new_auth_enabled\"/" "$SERVICES_DIR/$name.conf"
+    if [ "$auth_changed" -eq 1 ]; then
+        sed -i "/SVC_HTPASSWD=/d" "$SERVICES_DIR/$name.conf"
+        printf "SVC_HTPASSWD='%s'\n" "$new_htpasswd" >> "$SERVICES_DIR/$name.conf"
+    fi
+    if [ "$SVC_TYPE" = "ttyd" ]; then
+        if grep -q "SVC_TTYD_CMD=" "$SERVICES_DIR/$name.conf"; then
+            sed -i "s|SVC_TTYD_CMD=.*|SVC_TTYD_CMD=\"$new_ttyd_cmd\"|" "$SERVICES_DIR/$name.conf"
+        else
+            echo "SVC_TTYD_CMD=\"$new_ttyd_cmd\"" >> "$SERVICES_DIR/$name.conf"
         fi
+    fi
 
-        msg "Сервис '$name' успешно обновлён локально и на VPS!"
-        pause
+    msg "Сервис '$name' обновлен"
+    [ "$was_running" -eq 1 ] && do_start_service "$name"
+    pause
     done
 }
 
@@ -1078,7 +1386,9 @@ do_start_interactive() {
     if [ "$SELECTED_SERVICE" = "__ALL__" ]; then
         do_start_all
     else
-        do_start_service "$SELECTED_SERVICE"
+        for name in $SELECTED_SERVICE; do
+            do_start_service "$name"
+        done
     fi
     pause
 }
@@ -1092,9 +1402,29 @@ do_stop_interactive() {
     if [ "$SELECTED_SERVICE" = "__ALL__" ]; then
         do_stop_all
     else
-        do_stop_service "$SELECTED_SERVICE"
+        for name in $SELECTED_SERVICE; do
+            do_stop_service "$name"
+        done
     fi
     pause
+}
+
+do_start_all() {
+    msg "Запускаю все настроенные сервисы..."
+    for f in "$SERVICES_DIR"/*.conf; do
+        [ -f "$f" ] || continue
+        local s_name=$(basename "$f" .conf)
+        do_start_service "$s_name"
+    done
+}
+
+do_stop_all() {
+    msg "Останавливаю все настроенные сервисы..."
+    for f in "$SERVICES_DIR"/*.conf; do
+        [ -f "$f" ] || continue
+        local s_name=$(basename "$f" .conf)
+        do_stop_service "$s_name"
+    done
 }
 
 do_restart_interactive() {
@@ -1106,16 +1436,17 @@ do_restart_interactive() {
     if [ "$SELECTED_SERVICE" = "__ALL__" ]; then
         for f in "$SERVICES_DIR"/*.conf; do
             [ -f "$f" ] || continue
-            . "$f"
-            do_stop_service "$SVC_NAME"
+            local s_name=$(basename "$f" .conf)
+            do_stop_service "$s_name"
             sleep 1
-            do_start_service "$SVC_NAME"
+            do_start_service "$s_name"
         done
     else
-        load_service "$SELECTED_SERVICE"
-        do_stop_service "$SELECTED_SERVICE"
-        sleep 1
-        do_start_service "$SELECTED_SERVICE"
+        for name in $SELECTED_SERVICE; do
+            do_stop_service "$name"
+            sleep 1
+            do_start_service "$name"
+        done
     fi
     pause
 }
@@ -1123,39 +1454,196 @@ do_restart_interactive() {
 # ══════════════════════════════════════════════════════════════════════
 # ЗАПУСК / ОСТАНОВ (одного сервиса)
 # ══════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════
+# УПРАВЛЕНИЕ TTYD
+# ══════════════════════════════════════════════════════════════════════
+# Внутренняя функция проверки занятости порта (совместимость ss/netstat)
+_is_port_busy() {
+    local port="$1"
+    if command -v ss >/dev/null 2>&1; then
+        ss -tln | grep -q ":$port "
+    elif command -v netstat >/dev/null 2>&1; then
+        netstat -tnl | grep -q ":$port "
+    else
+        # Если нет ничего, считаем порт свободным (рискованно, но лучше чем падение)
+        return 1
+    fi
+}
+
+start_ttyd() {
+    local port="${1:-7681}"
+    local cmd="${SVC_TTYD_CMD:-login}"
+    local log="/tmp/rproxy_ttyd_${port}.log"
+    local pid_file="/opt/var/run/rproxy/ttyd_${port}.pid"
+    
+    # 0️⃣ Динамический поиск бинарника
+    local ttyd_bin=""
+    if command -v ttyd >/dev/null 2>&1; then
+        ttyd_bin=$(command -v ttyd)
+    elif [ -x "/opt/bin/ttyd" ]; then
+        ttyd_bin="/opt/bin/ttyd"
+    else
+        msg "ttyd не найден. Попытка установки..."
+        opkg update >/dev/null 2>&1
+        opkg install ttyd >/dev/null 2>&1
+        ttyd_bin=$(command -v ttyd || echo "/opt/bin/ttyd")
+    fi
+
+    if [ ! -x "$ttyd_bin" ]; then
+        err "Критическая ошибка: бинарник ttyd не найден!"
+        return 1
+    fi
+
+    local setsid_bin=""
+    command -v setsid >/dev/null 2>&1 && setsid_bin="setsid"
+
+    msg "Запуск ttyd терминала с Watchdog (Изолированный)..."
+    msg "Бинарник: $ttyd_bin"
+    msg "Порт: $port"
+
+    mkdir -p /opt/var/run/rproxy
+
+    # 1️⃣ Проверка доступности порта
+    if _is_port_busy "$port"; then
+        warn "Порт $port уже занят, ttyd не может быть запущен."
+        return 1
+    fi
+
+    # 2️⃣ Агрессивная очистка
+    [ -f "$pid_file" ] && { kill -TERM "$(cat "$pid_file")" 2>/dev/null; rm -f "$pid_file"; }
+    
+    # Уничтожаем все старые экземпляры Watchdog и ttyd для этого порта
+    pkill -9 -f "rproxy.*ttyd.*-p $port" >/dev/null 2>&1
+    pkill -9 -f "ttyd.*-p $port" >/dev/null 2>&1
+    fuser -k ${port}/tcp >/dev/null 2>&1
+    sleep 1
+
+    # 3️⃣ Watchdog Launcher
+    (
+        trap 'exit 0' TERM INT
+        
+        while true; do
+            if [ -x "$ttyd_bin" ]; then
+                # Запуск без env -i и setsid для сохранения TTY/PTY
+                "$ttyd_bin" -W --max-clients 10 -i 0.0.0.0 -p "$port" -- $cmd >> "$log" 2>&1
+            else
+                echo "$(date) Error: ttyd lost during runtime!" >> "$log"
+                exit 1
+            fi
+            
+            local exit_code=$?
+            echo "$(date) ttyd stopped with exit code $exit_code, restarting in 2s..." >> "$log"
+            sleep 2
+        done
+    ) &
+
+    local watchdog_pid=$!
+    echo "$watchdog_pid" > "$pid_file"
+
+    # 4️⃣ Верификация старта
+    msg "Верификация запуска..."
+    local start_ok=0
+    for i in 1 2 3 4 5; do
+        if _is_port_busy "$port"; then
+            start_ok=1
+            break
+        fi
+        sleep 1
+    done
+
+    if [ $start_ok -eq 1 ]; then
+        msg "ttyd успешно запущен (Watchdog PID $watchdog_pid)"
+        return 0
+    else
+        err "ttyd не смог открыть порт за 5 секунд. Отмена."
+        kill -TERM "$watchdog_pid" 2>/dev/null
+        rm -f "$pid_file"
+        # Убиваем возможные остатки процесса
+        pkill -9 -f "ttyd.*-p $port" >/dev/null 2>&1
+        fuser -k ${port}/tcp >/dev/null 2>&1
+        [ -s "$log" ] && tail -n 15 "$log"
+        return 1
+    fi
+}
+
+stop_ttyd() {
+    local port="${1:-7681}"
+    local pid_file="/opt/var/run/rproxy/ttyd_${port}.pid"
+
+    if [ -f "$pid_file" ]; then
+        local pid=$(cat "$pid_file")
+        msg "Остановка Watchdog ttyd (PID $pid)..."
+        kill -TERM "$pid" 2>/dev/null
+        rm -f "$pid_file"
+    fi
+    pkill -9 -f "rproxy.*ttyd.*-p $port" >/dev/null 2>&1
+    pkill -9 -f "ttyd.*-p $port" >/dev/null 2>&1
+    fuser -k ${port}/tcp >/dev/null 2>&1
+}
+
 do_start_service() {
     local name="$1"
     load_service "$name" || return
 
+    local lock_file="$LOCK_DIR/$name.lock"
+    if [ -f "$lock_file" ]; then
+        warn "Сервис '$name' уже запускается (lock-файл существует)."
+        return
+    fi
+    touch "$lock_file"
+    trap 'rm -f "$lock_file"' EXIT
+
     if is_running "$name"; then
-        warn "Сервис '$name' уже запущен"
+        msg "Сервис '$name' уже запущен."
+        rm -f "$lock_file"
         return
     fi
 
     msg "Запускаю туннель '$name' ($SVC_TARGET_HOST:$SVC_TARGET_PORT → VPS:$SVC_TUNNEL_PORT)..."
 
+    # Динамический порт для ttyd
+    if [ "$SVC_TYPE" = "ttyd" ]; then
+        local t_port="${SVC_TTYD_PORT:-7681}"
+        if start_ttyd "$t_port"; then
+            SVC_TARGET_PORT="$t_port"
+            SVC_TARGET_HOST="127.0.0.1"
+        else
+            rm -f "$lock_file"
+            return 1
+        fi
+    fi
+
     local ssh_exec="/opt/bin/ssh"
     [ ! -f "$ssh_exec" ] && ssh_exec="ssh"
     export AUTOSSH_PATH="$ssh_exec"
 
-    mkdir -p "$PID_DIR"
-    local pid_file
-    pid_file=$(get_pid_file "$name")
-
-    msg "Синхронизация с VPS (очистка портов)..."
-    ssh_cmd "fuser -k $SVC_TUNNEL_PORT/tcp >/dev/null 2>&1 || true"
+    msg "Проверка порта $SVC_TUNNEL_PORT на VPS..."
+    local hex_port=$(printf "%04X" $SVC_TUNNEL_PORT)
+    local check_cmd="grep -q \" :$hex_port \" /proc/net/tcp 2>/dev/null || (command -v ss >/dev/null 2>&1 && ss -tln | grep -q \":$SVC_TUNNEL_PORT \") || (command -v netstat >/dev/null 2>&1 && netstat -tnl 2>/dev/null | grep -q \":$SVC_TUNNEL_PORT \")"
+    if ssh_cmd "$check_cmd"; then
+        warn "Порт $SVC_TUNNEL_PORT на VPS уже занят. Пытаюсь освободить..."
+        ssh_cmd "fuser -k $SVC_TUNNEL_PORT/tcp >/dev/null 2>&1 || true"
+        sleep 1
+    fi
 
     local ssh_opts="-o StrictHostKeyChecking=no -o ServerAliveInterval=10 -o ServerAliveCountMax=3 -o ConnectTimeout=10 -o ExitOnForwardFailure=yes"
     local tunnel_args="-R 0.0.0.0:$SVC_TUNNEL_PORT:$SVC_TARGET_HOST:$SVC_TARGET_PORT"
+    
+    # Режим динамической авторизации удален для упрощения.
+    
+    # Мониторинг порт для autossh (20000 + случайное число)
+    # Мониторинг порт для autossh (20000 + случайное число)
+    # В /bin/sh нет $RANDOM, используем awk для генерации
+    local mon_port=$((20000 + $(awk 'BEGIN{srand(); print int(rand()*1000)}')))
 
     if [ "$VPS_AUTH" = "password" ]; then
-        AUTOSSH_GATETIME=0 sshpass -p "$VPS_PASS" autossh -M 0 -f -N \
+        AUTOSSH_GATETIME=0 sshpass -p "$VPS_PASS" autossh -M "$mon_port" -f -N \
             $ssh_opts \
             -p "$VPS_PORT" \
             $tunnel_args \
             "$VPS_USER@$VPS_HOST" &
     else
-        AUTOSSH_GATETIME=0 autossh -M 0 -f -N \
+        AUTOSSH_GATETIME=0 autossh -M "$mon_port" -f -N \
             $ssh_opts \
             -i "$SSH_KEY" \
             -p "$VPS_PORT" \
@@ -1164,40 +1652,87 @@ do_start_service() {
     fi
 
     local bg_pid=$!
+    # Трюк для получения реального PID autossh, если он ушел в форк
     sleep 2
-
     local real_pid
-    real_pid=$(pgrep -f "autossh.*$SVC_TUNNEL_PORT:$SVC_TARGET_HOST:$SVC_TARGET_PORT" 2>/dev/null | head -1)
-    [ -z "$real_pid" ] && real_pid=$(pgrep -f "ssh.*$SVC_TUNNEL_PORT:$SVC_TARGET_HOST:$SVC_TARGET_PORT" 2>/dev/null | head -1)
+    real_pid=$(pgrep -f "autossh.*-M $mon_port")
     [ -z "$real_pid" ] && real_pid=$bg_pid
 
-    echo "$real_pid" > "$pid_file"
-    msg "Туннель '$name' запущен (PID: $real_pid)"
+    echo "$real_pid" > "$(get_pid_file "$name")"
+    msg "Туннель '$name' запущен (PID: $real_pid, MonPort: $mon_port)"
+
+    # Вывод подсказки для подключения
+    if [ "$SVC_TYPE" = "ttyd" ]; then
+        local proto="http"
+        [ "$SVC_SSL" = "yes" ] && proto="https"
+        local url="$proto://$SVC_DOMAIN"
+        [ "$SVC_EXT_PORT" != "80" ] && [ "$SVC_EXT_PORT" != "443" ] && url="$url:$SVC_EXT_PORT"
+        [ -z "$SVC_DOMAIN" ] && url="$proto://$VPS_HOST:$SVC_EXT_PORT"
+
+        draw_separator
+        printf "  ${BOLD}Веб-терминал (ttyd) доступен по адресу:${NC}\n"
+        printf "  ${CYAN}$url${NC}\n"
+        draw_separator
+    elif [ "$SVC_TYPE" = "tcp" ] || [ "$SVC_TYPE" = "ssh" ] || [ "$SVC_TYPE" = "http" ]; then
+        draw_separator
+        printf "  ${BOLD}Инструкция по подключению:${NC}\n"
+        if [ "$SVC_TYPE" = "tcp" ] || [ "$SVC_TYPE" = "ssh" ]; then
+             if [ -n "$SVC_DOMAIN" ]; then
+                 if [ "$SVC_SSL" = "yes" ]; then
+                     printf "  ${DIM}Через ProxyCommand (SSL):${NC}\n"
+                     printf "  ssh -o ProxyCommand=\"openssl s_client -quiet -connect $SVC_DOMAIN:$SVC_EXT_PORT\" root@$SVC_TARGET_HOST\n"
+                 else
+                     printf "  ssh root@$SVC_DOMAIN -p $SVC_EXT_PORT\n"
+                 fi
+             else
+                 printf "  ssh root@$VPS_HOST -p $SVC_EXT_PORT\n"
+             fi
+        else
+             local proto="http"
+             [ "$SVC_SSL" = "yes" ] && proto="https"
+             local url="$proto://$SVC_DOMAIN"
+             [ "$SVC_EXT_PORT" != "80" ] && [ "$SVC_EXT_PORT" != "443" ] && url="$url:$SVC_EXT_PORT"
+             [ -z "$SVC_DOMAIN" ] && url="$proto://$VPS_HOST:$SVC_EXT_PORT"
+             printf "  Доступен по адресу: ${CYAN}$url${NC}\n"
+        fi
+        draw_separator
+    fi
+
+    rm -f "$lock_file"
 }
 
 do_stop_service() {
     local name="$1"
-    load_service "$name" || return # Загружаем VPS для правильной очистки
+    load_service "$name" || return
+    
     local pid_file
     pid_file=$(get_pid_file "$name")
 
-    if [ ! -f "$pid_file" ]; then
-        warn "Сервис '$name' не запущен"
-        return
+    # Сначала проверяем туннель
+    if [ -f "$pid_file" ]; then
+        local pid
+        pid=$(cat "$pid_file")
+        msg "Остановка туннеля '$name' (PID: $pid)..."
+        kill "$pid" 2>/dev/null
+        # Если туннель не умер — форсируем
+        sleep 1
+        kill -9 "$pid" 2>/dev/null
+        rm -f "$pid_file"
+    else
+        warn "PID-файл туннеля '$name' не найден"
     fi
 
-    local pid
-    pid=$(cat "$pid_file")
-    kill "$pid" 2>/dev/null
-    pkill -f "ssh.*:$SVC_TUNNEL_PORT:.*$VPS_HOST" 2>/dev/null
+    # Теперь ttyd если был
+    if [ "$SVC_TYPE" = "ttyd" ]; then
+        stop_ttyd "${SVC_TTYD_PORT:-7681}"
+    fi
 
-    rm -f "$pid_file"
-    msg "Туннель '$name' остановлен"
+    msg "Сервис '$name' остановлен"
 }
 
 _clear_svc_vars() {
     unset SVC_NAME SVC_VPS SVC_TARGET_HOST SVC_TARGET_PORT SVC_TUNNEL_PORT
-    unset SVC_EXT_PORT SVC_DOMAIN SVC_SSL SVC_NDM_AUTH SVC_HTPASSWD SVC_ENABLED
+    unset SVC_EXT_PORT SVC_DOMAIN SVC_SSL SVC_NDM_AUTH SVC_HTPASSWD SVC_TYPE SVC_TTYD_CMD SVC_ENABLED SVC_TTYD_PORT
 }
 
 load_service() {
@@ -1206,6 +1741,47 @@ load_service() {
     [ -f "$f" ] || return 1
     . "$f"
     load_vps "$SVC_VPS"
+}
+
+check_remote_ssl() {
+    local domain="$1"
+    # Проверяем наличие папки сертификата в LetsEncrypt на VPS
+    ssh_cmd "[ -d /etc/letsencrypt/live/$domain ]" >/dev/null 2>&1
+}
+
+generate_nginx_stream_conf() {
+    local name="$1"
+    local tunnel_port="$2"
+    local ext_port="$3"
+    local target_file="$4"
+    local domain="$5"
+
+    if [ -n "$domain" ]; then
+        # Для TCP через домен используем SSL с расширенными настройками
+        cat > "$target_file" << NGINXEOF
+server {
+    listen $ext_port ssl;
+    proxy_pass 127.0.0.1:$tunnel_port;
+
+    ssl_certificate /etc/letsencrypt/live/$domain/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/$domain/privkey.pem;
+    
+    # Расширенные настройки SSL для стабильности TCP-потока
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers HIGH:!aNULL:!MD5;
+    ssl_handshake_timeout 15s;
+    ssl_session_cache shared:SSLSTREAM:10m;
+    ssl_session_timeout 1h;
+}
+NGINXEOF
+    else
+        cat > "$target_file" << NGINXEOF
+server {
+    listen $ext_port;
+    proxy_pass 127.0.0.1:$tunnel_port;
+}
+NGINXEOF
+    fi
 }
 
 generate_nginx_conf() {
@@ -1217,6 +1793,8 @@ generate_nginx_conf() {
     local ext_port="$6"
     local use_ndm_auth="$7"
     local target_file="$8"
+    local use_ssl="${9:-no}"
+    local type="${10:-http}"
 
     local stealth_host="$t_host"
     [ "$t_port" != "80" ] && stealth_host="$t_host:$t_port"
@@ -1230,9 +1808,63 @@ generate_nginx_conf() {
     fi
 
     if [ -n "$domain" ]; then
-        cat > "$target_file" << NGINXEOF
+        # Если домен указан, проверяем наличие SSL сертификата на VPS
+        local has_ssl=0
+        check_remote_ssl "$domain" && has_ssl=1
+        
+        # Для доменов используем SSL по умолчанию, если он есть или если явно включен
+        if [ "$has_ssl" = "1" ] || [ "$use_ssl" = "yes" ]; then
+            local listen_opts="$ext_port ssl"
+            [ "$ext_port" = "443" ] || listen_opts="$ext_port ssl"
+            
+            cat > "$target_file" << NGINXEOF
+server {
+    listen $listen_opts;
+    server_name "$domain";
+    proxy_buffering off;
+    proxy_request_buffering off;
+    
+    ssl_certificate /etc/letsencrypt/live/$domain/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/$domain/privkey.pem;
+    include /etc/letsencrypt/options-ssl-nginx.conf;
+    ssl_dhparam /etc/letsencrypt/ssl-dhparams.pem;
+
+    location / {
+        $auth_config
+        proxy_pass http://127.0.0.1:$tunnel_port;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_set_header X-Forwarded-Port \$server_port;
+        proxy_cookie_domain "$t_host" "\$host";
+        proxy_set_header Origin "";
+        proxy_read_timeout 7d;
+        proxy_send_timeout 7d;
+    }
+
+    # Автоматический редирект HTTP -> HTTPS на кастомных портах (400 -> 301)
+    error_page 497 301 =307 https://\$host:\$server_port\$request_uri;
+}
+NGINXEOF
+            # Добавляем редирект с 80 порта на этот домен, если это 443
+            if [ "$ext_port" = "443" ]; then
+                cat >> "$target_file" << NGINXEOF
 server {
     listen 80;
+    server_name "$domain";
+    return 301 https://\$host\$request_uri;
+}
+NGINXEOF
+            fi
+        else
+            # Если SSL еще нет и не включен явно — создаем временный 80/ext_port для Certbot
+            cat > "$target_file" << NGINXEOF
+server {
+    listen $ext_port;
     server_name "$domain";
     proxy_buffering off;
     proxy_request_buffering off;
@@ -1242,16 +1874,22 @@ server {
         proxy_http_version 1.1;
         proxy_set_header Upgrade \$http_upgrade;
         proxy_set_header Connection "upgrade";
-        proxy_set_header Host "$stealth_host";
-        proxy_set_header Origin "http://$stealth_host";
-        proxy_set_header Referer "http://$stealth_host/";
+        proxy_set_header Host \$host;
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_set_header X-Forwarded-Port \$server_port;
         proxy_cookie_domain "$t_host" "\$host";
+        proxy_set_header Origin "";
+        proxy_read_timeout 7d;
+        proxy_send_timeout 7d;
     }
+
+    # Автоматический редирект HTTP -> HTTPS на кастомных портах (400 -> 301)
+    error_page 497 301 =307 https://\$host:\$server_port\$request_uri;
 }
 NGINXEOF
+        fi
     else
         cat > "$target_file" << NGINXEOF
 server {
@@ -1265,10 +1903,13 @@ server {
         proxy_set_header Upgrade \$http_upgrade;
         proxy_set_header Connection "upgrade";
         proxy_set_header Host "$stealth_host";
-        proxy_set_header Origin "http://$stealth_host";
+        proxy_set_header Origin "";
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Port \$server_port;
         proxy_cookie_domain "$t_host" "\$host";
+        proxy_read_timeout 7d;
+        proxy_send_timeout 7d;
     }
 }
 NGINXEOF
@@ -1308,9 +1949,11 @@ do_setup() {
             VPS_HOST="" # Сброс перед загрузкой
             . "$f"
             local v_info="${DIM}${VPS_USER}@${VPS_HOST}:${VPS_PORT}${NC}"
+            v_info="${GREEN}root@$VPS_HOST:$VPS_PORT${NC}"
             [ -z "$VPS_HOST" ] && v_info="${RED}Не настроен${NC}"
             printf "  ${BOLD}%d)${NC}  %-14s %b\n" "$idx" "$(basename "$f" .conf)" "$v_info"
-            vps_list="$vps_list $(basename "$f" .conf)"
+            local v_name=$(basename "$f" .conf)
+            [ -z "$vps_list" ] && vps_list="$v_name" || vps_list="$vps_list $v_name"
         done
 
         if [ "$idx" -eq 0 ]; then
@@ -1529,12 +2172,19 @@ EOF
         mkdir -p /etc/nginx/sites-enabled
         grep -q 'sites-enabled' /etc/nginx/nginx.conf || sed -i '/http {/a\    include /etc/nginx/sites-enabled/*.conf;' /etc/nginx/nginx.conf
         command -v certbot >/dev/null 2>&1 || (apt-get update -qq && apt-get install -y -qq certbot python3-certbot-nginx || yum install -y certbot python3-certbot-nginx)
+        # Настройка Nginx Stream
+        mkdir -p /etc/nginx/streams-enabled
+        if ! grep -q 'streams-enabled' /etc/nginx/nginx.conf; then
+            # Добавляем блок stream в конец файла, если его нет
+            if grep -q 'stream {' /etc/nginx/nginx.conf; then
+                 # Блок есть, но без нашего инклуда - добавим внутрь (сложно седом, просто в конец)
+                 echo "include /etc/nginx/streams-enabled/*.conf;" >> /etc/nginx/nginx.conf
+            else
+                 printf "\nstream {\n    include /etc/nginx/streams-enabled/*.conf;\n}\n" >> /etc/nginx/nginx.conf
+            fi
+        fi
+
         systemctl enable nginx && systemctl start nginx
-        
-        # Оптимизация SSH на стороне сервера для туннелей
-        grep -q 'ClientAliveInterval' /etc/ssh/sshd_config || echo 'ClientAliveInterval 30' >> /etc/ssh/sshd_config
-        grep -q 'ClientAliveCountMax' /etc/ssh/sshd_config || echo 'ClientAliveCountMax 2' >> /etc/ssh/sshd_config
-        systemctl restart ssh
     "
     pause
 }
@@ -1582,6 +2232,28 @@ case "${1:-}" in
                 printf "  %-15s %-7s %-20s %s\n" "$SVC_NAME" "$type" "$addr" "$status"
             )
         done
+        ;;
+    _auth_handle)
+        # Удалено для упрощения
+        ;;
+    init-script)
+        cat <<EOF > /opt/etc/init.d/S99rproxy
+#!/bin/sh
+
+case "\$1" in
+start)
+    /opt/bin/rproxy start
+    ;;
+stop)
+    /opt/bin/rproxy stop
+    ;;
+restart)
+    /opt/bin/rproxy restart
+    ;;
+esac
+EOF
+        chmod +x /opt/etc/init.d/S99rproxy
+        msg "Скрипт автозагрузки создан: /opt/etc/init.d/S99rproxy"
         ;;
     -v|--version) echo "rProxy v$VERSION" ;;
     "")         main_menu ;;
