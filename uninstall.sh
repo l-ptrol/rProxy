@@ -36,7 +36,13 @@ rm -f "/opt/etc/init.d/S99rproxy"
 
 if [ -d "/opt/etc/rproxy" ]; then
     printf "  Удалить директорию конфигураций со всеми ключами и сервисами? (/opt/etc/rproxy) (y/n) [n]: "
-    read -r ans
+    # Читаем именно из терминала, чтобы не поглощать код скрипта при curl | sh
+    if [ -t 0 ]; then
+        read -r ans
+    else
+        read -r ans < /dev/tty 2>/dev/null || ans="n"
+    fi
+
     if [ "$ans" = "y" ] || [ "$ans" = "Y" ]; then
         rm -rf "/opt/etc/rproxy"
         msg "Директория конфигураций удалена."
