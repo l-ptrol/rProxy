@@ -3,7 +3,7 @@
 # Публикация локальных сервисов через SSH-туннели + nginx на VPS
 # https://github.com/l-ptrol/rProxy
 
-VERSION="2.0.0-Alpha.30"
+VERSION="2.0.0-Alpha.31"
 export PATH="/opt/bin:/opt/sbin:$PATH"
 CONF_DIR="/opt/etc/rproxy"
 CONF_FILE="$CONF_DIR/rproxy.conf"
@@ -140,6 +140,7 @@ ensure_local_deps() {
     _has_cmd openssl || missing="$missing openssl-util"
     _has_cmd curl    || missing="$missing curl"
     _has_cmd ttyd    || missing="$missing ttyd"
+    _has_cmd expect  || missing="$missing expect"
     _has_cmd pkill   || missing="$missing procps-ng-pkill"
     _has_cmd fuser   || missing="$missing psmisc"
 
@@ -1654,8 +1655,8 @@ do_start_service() {
     export AUTOSSH_PATH="$ssh_exec"
 
     msg "Проверка порта $SVC_TUNNEL_PORT на VPS..."
-    # Универсальная проверка (fallback: ss -> netstat)
-    if ssh_cmd "ss -tln | grep -q ':$SVC_TUNNEL_PORT ' || netstat -tnl | grep -q ':$SVC_TUNNEL_PORT '"; then
+    local check_cmd='(command -v ss >/dev/null 2>&1 && ss -tln || command -v netstat >/dev/null 2>&1 && netstat -tnl || [ -f /proc/net/tcp ] && cat /proc/net/tcp) | grep -i ":$(printf "%04X" $SVC_TUNNEL_PORT)\|:$SVC_TUNNEL_PORT " >/dev/null 2>&1'
+    if ssh_cmd "$check_cmd"; then
         warn "Порт $SVC_TUNNEL_PORT на VPS уже занят. Пытаюсь освободить..."
         ssh_cmd "fuser -k $SVC_TUNNEL_PORT/tcp >/dev/null 2>&1 || true"
         sleep 1
