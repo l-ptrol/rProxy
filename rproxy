@@ -3,7 +3,7 @@
 # Публикация локальных сервисов через SSH-туннели + nginx на VPS
 # https://github.com/l-ptrol/rProxy
 
-VERSION="2.0.0-Alpha.15"
+VERSION="2.0.0-Alpha.16"
 export PATH="/opt/bin:/opt/sbin:$PATH"
 CONF_DIR="/opt/etc/rproxy"
 CONF_FILE="$CONF_DIR/rproxy.conf"
@@ -142,7 +142,6 @@ ensure_local_deps() {
     _has_cmd ttyd    || missing="$missing ttyd"
     _has_cmd pkill   || missing="$missing procps-ng-pkill"
     _has_cmd fuser   || missing="$missing psmisc"
-    _has_cmd setsid  || missing="$missing util-linux-setsid"
 
     # Проверка ss или netstat
     if ! _has_cmd ss && ! _has_cmd netstat; then
