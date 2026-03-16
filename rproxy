@@ -3,7 +3,7 @@
 # Публикация локальных сервисов через SSH-туннели + nginx на VPS
 # https://github.com/l-ptrol/rProxy
 
-VERSION="2.0.0-Alpha.40"
+VERSION="2.0.0-Alpha.41"
 export PATH="/opt/bin:/opt/sbin:$PATH"
 CONF_DIR="/opt/etc/rproxy"
 CONF_FILE="$CONF_DIR/rproxy.conf"
@@ -150,6 +150,7 @@ ensure_local_deps() {
     _has_cmd curl    || missing="$missing curl"
     _has_cmd ttyd    || missing="$missing ttyd"
     _has_cmd expect  || missing="$missing expect"
+    _has_cmd stty    || missing="$missing coreutils-stty"
     _has_cmd pkill   || missing="$missing procps-ng-pkill"
     _has_cmd fuser   || missing="$missing psmisc"
 
@@ -319,13 +320,12 @@ start_auth_provider() {
     fi
 
     msg "Запуск Auth Provider на порту $port..."
-    rm -f "$fifo"
-    mkfifo "$fifo"
     (
         while true; do
-            # Классическая схема двунаправленного пайпа (nc < fifo | script > fifo)
-            # Если nc вылетает, ждем 5 секунд перед рестартом (защита от флуда)
-            if ! nc -l -p $port < "$fifo" | "$0" _auth_handle > "$fifo" 2>/dev/null; then
+            # Используем режим -e (execute) для прямой связи с обработчиком.
+            # Это исключает рекурсию (чтение собственного вывода через FIFO).
+            # Пакет 'netcat' в Entware поддерживает этот режим.
+            if ! nc -l -p $port -e "$0" _auth_handle 2>/dev/null; then
                 sleep 5
             else
                 sleep 0.5
@@ -1873,6 +1873,9 @@ generate_nginx_conf() {
     elif [ "$use_ndm_auth" = "dynamic" ]; then
         auth_config="
     auth_request /auth-check;
+    auth_request_set \$auth_header \$upstream_http_www_authenticate;
+    add_header WWW-Authenticate \$auth_header always;
+    
     location = /auth-check {
         internal;
         proxy_pass http://127.0.0.1:7979;
