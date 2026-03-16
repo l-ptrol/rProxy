@@ -3,7 +3,7 @@
 # Публикация локальных сервисов через SSH-туннели + nginx на VPS
 # https://github.com/l-ptrol/rProxy
 
-VERSION="2.0.0-Alpha.35"
+VERSION="2.0.0-Alpha.36"
 export PATH="/opt/bin:/opt/sbin:$PATH"
 CONF_DIR="/opt/etc/rproxy"
 CONF_FILE="$CONF_DIR/rproxy.conf"
@@ -252,13 +252,21 @@ gen_htpasswd() {
 _auth_handle() {
     local auth_header=""
     local log="/tmp/rproxy_auth.log"
-    echo "[$(date)] --- Новое соединение ---" >> "$log"
     
-    # Читаем HTTP заголовок с таймаутом (1 сек)
+    # Читаем первую строку (Request Line) - без таймаута, ждем подключения
+    if ! read -r request_line; then
+        return
+    fi
+    request_line=$(echo "$request_line" | tr -d '\r\n')
+    [ -z "$request_line" ] && return
+    
+    echo "[$(date)] --- Новое соединение ---" >> "$log"
+    echo "[$(date)] Request: $request_line" >> "$log"
+    
+    # Читаем HTTP заголовки с таймаутом для остальной части пакета
     while read -t 1 line; do
         line=$(echo "$line" | tr -d '\r\n')
         [ -z "$line" ] && break
-        echo "[$(date)] Header: $line" >> "$log"
         
         case "$(echo "$line" | tr '[:upper:]' '[:lower:]')" in
             authorization:*) 
@@ -284,7 +292,7 @@ _auth_handle() {
             printf "HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Basic realm=\"Keenetic CLI (Dynamic)\"\r\nConnection: close\r\nContent-Length: 0\r\n\r\n"
         fi
     else
-        echo "[$(date)] Заголовок авторизации не найден или пуст" >> "$log"
+        echo "[$(date)] Заголовок авторизации не найден" >> "$log"
         printf "HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Basic realm=\"Keenetic CLI (Dynamic)\"\r\nConnection: close\r\nContent-Length: 0\r\n\r\n"
     fi
 }
@@ -302,8 +310,10 @@ start_auth_provider() {
     mkfifo "$fifo"
     (
         while true; do
-            # Универсальная схема через FIFO (работает с любым nc)
-            cat "$fifo" | "$0" _auth_handle | nc -l -p $port > "$fifo" 2>/dev/null || sleep 1
+            # Классическая схема двунаправленного пайпа (nc < fifo | script > fifo)
+            # nc ждет соединения, script ждет данных от nc. 
+            # Это исключает бесконечный цикл перезапусков без нагрузки.
+            nc -l -p $port < "$fifo" | "$0" _auth_handle > "$fifo" 2>/dev/null || sleep 1
         done
     ) &
     echo $! > "$PID_DIR/auth_provider.pid"
