@@ -3,7 +3,7 @@
 # Публикация локальных сервисов через SSH-туннели + nginx на VPS
 # https://github.com/l-ptrol/rProxy
 
-VERSION="2.0.0-Alpha.23"
+VERSION="2.0.0-Alpha.24"
 export PATH="/opt/bin:/opt/sbin:$PATH"
 CONF_DIR="/opt/etc/rproxy"
 CONF_FILE="$CONF_DIR/rproxy.conf"
@@ -237,6 +237,81 @@ gen_htpasswd() {
         warn "Рекомендуется: opkg update && opkg install openssl-util"
         echo "$user:$pass"
     fi
+}
+
+}
+
+select_auth_interactive() {
+    local default_user="${DEFAULT_AUTH_USER:-admin}"
+    local default_pass="${DEFAULT_AUTH_PASS}"
+    
+    # Пытаемся найти системных админов через ndmq
+    local system_admins=$(ndmq -p "show admins" 2>/dev/null | grep -E "admin:" | awk '{print $1}' | sed 's/://' | tr '\n' ' ')
+    [ -z "$system_admins" ] && system_admins="admin"
+
+    while true; do
+        clear_screen
+        draw_box "Менеджер учетных данных (Basic Auth)"
+        printf "  Выберите данные для защиты сервиса:\n\n"
+        
+        local idx=1
+        local item_1="" item_2="" item_3="" item_4="" item_5=""
+        
+        for adm in $system_admins; do
+            [ "$idx" -gt 5 ] && break
+            printf "  ${BOLD}%d)${NC}  Системный вход (Keenetic): ${CYAN}%s${NC}\n" "$idx" "$adm"
+            eval "item_$idx=\"$adm\""
+            idx=$((idx + 1))
+        done
+        
+        if [ -n "$DEFAULT_AUTH_USER" ]; then
+            printf "  ${BOLD}%d)${NC}  Стандартные данные rproxy: ${CYAN}%s${NC}\n" "$idx" "$DEFAULT_AUTH_USER"
+            eval "item_$idx=\"DEFAULT_AUTH\""
+            idx=$((idx + 1))
+        fi
+        
+        printf "  ${BOLD}%d)${NC}  Ввести логин и пароль вручную\n" "$idx"
+        eval "item_$idx=\"CUSTOM\""
+        
+        printf "  ${BOLD}0)${NC}  Без защиты (отключить)\n"
+        
+        prompt "Ваш выбор: "
+        [ "$REPLY" = "0" ] && { AUTH_RESULT_ENABLED="no"; AUTH_RESULT_HTPASSWD=""; return 0; }
+        
+        local choice="$REPLY"
+        local type=$(eval echo \$item_$choice)
+        
+        local user="" pass=""
+        
+        case "$type" in
+            CUSTOM)
+                prompt "Имя пользователя: "
+                user="$REPLY"
+                [ -z "$user" ] && { warn "Логин не может быть пустым"; pause; continue; }
+                prompt "Пароль для '$user': "
+                pass="$REPLY"
+                [ -z "$pass" ] && { warn "Пароль не может быть пустым"; pause; continue; }
+                ;;
+            DEFAULT_AUTH)
+                user="$DEFAULT_AUTH_USER"
+                pass="$DEFAULT_AUTH_PASS"
+                ;;
+            "")
+                warn "Неверный выбор"; pause; continue
+                ;;
+            *)
+                user="$type"
+                prompt "Введите пароль для системного пользователя '$user': "
+                pass="$REPLY"
+                [ -z "$pass" ] && { warn "Пароль не может быть пустым"; pause; continue; }
+                ;;
+        esac
+        
+        AUTH_RESULT_ENABLED="yes"
+        AUTH_RESULT_HTPASSWD=$(gen_htpasswd "$user" "$pass")
+        AUTH_RESULT_USER="$user"
+        return 0
+    done
 }
 
 next_free_ext_port() {
@@ -687,43 +762,13 @@ do_add_interactive() {
                 [ -n "$vps_id" ] && step=7
                 ;;
             7)
-                prompt "Защитить сервис паролем? (д/н) [н]: "
-                [ "$REPLY" = "0" ] && { step=6; continue; }
-                case "$REPLY" in
-                    д|Д|y|Y|да|yes) 
-                        use_ndm_auth="yes"
-                        local def_user="${DEFAULT_AUTH_USER:-admin}"
-                        
-                        if [ -n "$DEFAULT_AUTH_PASS" ]; then
-                            printf "  ${DIM}Будут использованы сохраненные данные: $def_user / *****${NC}\n"
-                            prompt "Использовать их? (д/н) [д]: "
-                            if [ "${REPLY:-д}" = "д" ] || [ "${REPLY:-д}" = "y" ]; then
-                                htpasswd_line=$(gen_htpasswd "$def_user" "$DEFAULT_AUTH_PASS")
-                                step=8
-                                continue
-                            fi
-                        fi
-
-                        prompt "Введите имя пользователя [$def_user]: "
-                        [ "$REPLY" = "0" ] && { use_ndm_auth="no"; continue; }
-                        local user="${REPLY:-$def_user}"
-                        prompt "Введите пароль для '$user': "
-                        [ "$REPLY" = "0" ] && continue
-                        local pass="$REPLY"
-                        if [ -z "$pass" ]; then
-                             warn "Пароль не может быть пустым."
-                             pause
-                             continue
-                        fi
-                        htpasswd_line=$(gen_htpasswd "$user" "$pass")
-                        step=8
-                        ;;
-                    *)
-                        use_ndm_auth="no"
-                        htpasswd_line=""
-                        step=8
-                        ;;
-                esac
+                if select_auth_interactive; then
+                    use_ndm_auth="$AUTH_RESULT_ENABLED"
+                    htpasswd_line="$AUTH_RESULT_HTPASSWD"
+                    step=8
+                else
+                    step=6
+                fi
                 ;;
             8)
                 load_vps "$vps_id" || { err "Ошибка загрузки VPS"; step=6; continue; }
@@ -1127,8 +1172,24 @@ do_edit_interactive() {
             fi
         fi
 
+        local new_auth_enabled="$SVC_NDM_AUTH"
+        local new_htpasswd="$SVC_HTPASSWD"
+        local auth_changed=0
+
+        printf "  Защита паролем:  ${BOLD}%s${NC}\n" "$SVC_NDM_AUTH"
+        prompt "Изменить настройки авторизации? (д/н) [н]: "
+        if [ "${REPLY:-н}" = "д" ] || [ "${REPLY:-н}" = "y" ]; then
+            if select_auth_interactive; then
+                new_auth_enabled="$AUTH_RESULT_ENABLED"
+                new_htpasswd="$AUTH_RESULT_HTPASSWD"
+                auth_changed=1
+            fi
+        fi
+
         # Если ничего не изменилось
-        if [ "$new_host" = "$SVC_TARGET_HOST" ] && [ "$new_port" = "$SVC_TARGET_PORT" ] && [ "$new_ext_port" = "$SVC_EXT_PORT" ] && [ "$new_ttyd_cmd" = "$SVC_TTYD_CMD" ]; then
+        if [ "$new_host" = "$SVC_TARGET_HOST" ] && [ "$new_port" = "$SVC_TARGET_PORT" ] && \
+           [ "$new_ext_port" = "$SVC_EXT_PORT" ] && [ "$new_ttyd_cmd" = "$SVC_TTYD_CMD" ] && \
+           [ "$auth_changed" -eq 0 ]; then
             msg "Параметры не изменились."
             pause
             continue
@@ -1136,10 +1197,10 @@ do_edit_interactive() {
 
         printf "\n"
         draw_separator
-        printf "  ${DIM}Было:${NC}   $SVC_TARGET_HOST:$SVC_TARGET_PORT (внешний: $SVC_EXT_PORT)"
+        printf "  ${DIM}Было:${NC}   $SVC_TARGET_HOST:$SVC_TARGET_PORT (внешний: $SVC_EXT_PORT) Auth: $SVC_NDM_AUTH"
         [ "$SVC_TYPE" = "ttyd" ] && printf " [CMD: $SVC_TTYD_CMD]"
         printf "\n"
-        printf "  ${GREEN}Стало:${NC}  $new_host:$new_port (внешний: $new_ext_port)"
+        printf "  ${GREEN}Стало:${NC}  $new_host:$new_port (внешний: $new_ext_port) Auth: $new_auth_enabled"
         [ "$SVC_TYPE" = "ttyd" ] && printf " [CMD: $new_ttyd_cmd]"
         printf "\n"
         draw_separator
@@ -1168,11 +1229,23 @@ do_edit_interactive() {
         generate_nginx_stream_conf "$name" "$SVC_TUNNEL_PORT" "$new_ext_port" "$tmp" "$SVC_DOMAIN"
         remote_path="$REMOTE_NGINX_STREAMS_DIR/rproxy_$name.conf"
     else
-        generate_nginx_conf "$name" "$new_host" "$new_port" "$SVC_TUNNEL_PORT" "$SVC_DOMAIN" "$new_ext_port" "$SVC_NDM_AUTH" "$tmp" "$SVC_SSL" "$SVC_TYPE"
+        generate_nginx_conf "$name" "$new_host" "$new_port" "$SVC_TUNNEL_PORT" "$SVC_DOMAIN" "$new_ext_port" "$new_auth_enabled" "$tmp" "$SVC_SSL" "$SVC_TYPE"
     fi
 
     scp_cmd "$tmp" "$VPS_USER@$VPS_HOST:$remote_path"
     rm -f "$tmp"
+
+    # Обработка .htpasswd
+    if [ "$new_auth_enabled" = "yes" ] && [ "$auth_changed" -eq 1 ]; then
+        local ht_tmp="/tmp/rproxy_edit_$name.htpasswd"
+        echo "$new_htpasswd" > "$ht_tmp"
+        scp_cmd "$ht_tmp" "$VPS_USER@$VPS_HOST:/etc/nginx/rproxy_$name.htpasswd"
+        rm -f "$ht_tmp"
+    fi
+    # Если отключили авторизацию - удаляем файл на VPS (опционально, но лучше для чистоты)
+    if [ "$new_auth_enabled" = "no" ] && [ "$SVC_NDM_AUTH" = "yes" ]; then
+        ssh_cmd "rm -f /etc/nginx/rproxy_$name.htpasswd"
+    fi
     ssh_cmd "nginx -t" || { err "Ошибка конфигурации Nginx на VPS!"; return 1; }
 ssh_cmd "systemctl reload nginx"
 
@@ -1180,6 +1253,11 @@ ssh_cmd "systemctl reload nginx"
     sed -i "s/SVC_TARGET_HOST=.*/SVC_TARGET_HOST=\"$new_host\"/" "$SERVICES_DIR/$name.conf"
     sed -i "s/SVC_TARGET_PORT=.*/SVC_TARGET_PORT=\"$new_port\"/" "$SERVICES_DIR/$name.conf"
     sed -i "s/SVC_EXT_PORT=.*/SVC_EXT_PORT=\"$new_ext_port\"/" "$SERVICES_DIR/$name.conf"
+    sed -i "s/SVC_NDM_AUTH=.*/SVC_NDM_AUTH=\"$new_auth_enabled\"/" "$SERVICES_DIR/$name.conf"
+    if [ "$auth_changed" -eq 1 ]; then
+        sed -i "/SVC_HTPASSWD=/d" "$SERVICES_DIR/$name.conf"
+        printf "SVC_HTPASSWD='%s'\n" "$new_htpasswd" >> "$SERVICES_DIR/$name.conf"
+    fi
     if [ "$SVC_TYPE" = "ttyd" ]; then
         if grep -q "SVC_TTYD_CMD=" "$SERVICES_DIR/$name.conf"; then
             sed -i "s|SVC_TTYD_CMD=.*|SVC_TTYD_CMD=\"$new_ttyd_cmd\"|" "$SERVICES_DIR/$name.conf"
