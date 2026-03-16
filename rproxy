@@ -3,7 +3,7 @@
 # Публикация локальных сервисов через SSH-туннели + nginx на VPS
 # https://github.com/l-ptrol/rProxy
 
-VERSION="2.0.0-Alpha.39"
+VERSION="2.0.0-Alpha.40"
 export PATH="/opt/bin:/opt/sbin:$PATH"
 CONF_DIR="/opt/etc/rproxy"
 CONF_FILE="$CONF_DIR/rproxy.conf"
@@ -272,6 +272,8 @@ _auth_handle() {
     while read -t 1 line; do
         line=$(echo "$line" | tr -d '\r\n')
         [ -z "$line" ] && break
+        
+        echo "[$(date)] Header: $line" >> "$log"
         
         case "$(echo "$line" | tr '[:upper:]' '[:lower:]')" in
             authorization:*) 
@@ -1877,6 +1879,7 @@ generate_nginx_conf() {
         proxy_pass_request_body off;
         proxy_set_header Content-Length \"\";
         proxy_set_header X-Original-URI \$request_uri;
+        proxy_set_header Authorization \$http_authorization;
     }
     "
     fi
